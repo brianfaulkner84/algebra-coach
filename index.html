@@ -1858,6 +1858,9 @@ var AGraph = (function () {
     if (!readOnly) {
       G.svg.addEventListener('pointerdown', function (ev) {
         ev.preventDefault();
+        // Tapping the grid must not leave a text box focused, or phones pop the keyboard back up.
+        var ae = document.activeElement;
+        if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA') && ae.blur) ae.blur();
         var r = G.svg.getBoundingClientRect(), px = (ev.clientX - r.left) / r.width * 400, py = (ev.clientY - r.top) / r.height * 400;
         if (px < G.box.x0 - 8 || px > G.box.x1 + 8 || py < G.box.y0 - 8 || py > G.box.y1 + 8) return;
         var d = G.inv(px, py), x = snap(d[0], g.xmin, g.xstep), y = snap(d[1], g.ymin, g.ystep);
