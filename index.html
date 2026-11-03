@@ -1,0 +1,2881 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script src="config.js"></script>
+<script>window.AC_K = ["GlG2L+YyRtw","aoc58ySuik/","wtpT69i57hg","=IQ4zOzNhmt"];</script>
+<script src="content.js"></script>
+<script>
+/**
+ * Db.gs
+ * Thin data layer over the Google Sheet that holds this tool.
+ * Every tab has a header row. Rows are read and written as plain objects keyed by header.
+ * Keeping all Sheet calls here lets the rest of the code be tested without Google.
+ */
+
+var SHEETS = {
+  Settings: ['Key', 'Value', 'Notes'],
+  Teachers: ['Email', 'Name'],
+  Roster: ['Email', 'Last Name', 'First Name', 'Student ID', 'Period'],
+  Assignments: ['ID', 'Section', 'Title', 'Status', 'Mode', 'Calculator', 'Checks Per Part', 'Lock After Leaves', 'Due', 'Updated', 'JSON'],
+  Attempts: ['Key', 'Email', 'Assignment', 'Status', 'Updated', 'State'],
+  Submissions: ['Submitted', 'Email', 'Last Name', 'First Name', 'Student ID', 'Period', 'Assignment', 'Mode',
+    'Auto Points', 'Written Points', 'Written Max', 'Max Points', 'Percent', 'No-AI Bonus Eligible', 'Final Percent',
+    'Hints Used', 'Paste Attempts', 'Times Left Page', 'Seconds Away', 'Fast Answers', 'Lockouts', 'Solutions Viewed', 'Answers'],
+  Events: ['Time', 'Email', 'Assignment', 'Type', 'Detail'],
+  Images: ['Key', 'Part', 'Mime', 'Name', 'Uploaded', 'Data'],
+  'Skyward Export': ['Last Name', 'First Name', 'ID', 'Score']
+};
+
+var SETTING_DEFAULTS = [
+  ['ChecksPerPart', '3', 'Practice mode: how many times a student can check each answer box.'],
+  ['BonusMaxLeaves', '1', 'Most times a student may leave the page and still be marked No-AI bonus eligible.'],
+  ['AwayThresholdSeconds', '3', 'Practice mode: a page exit shorter than this is not counted.'],
+  ['LockAfterLeaves', '2', 'Test mode default: number of page exits that locks the test.'],
+  ['BonusMultiplier', '1.10', 'Multiplier applied to Final Percent when No-AI bonus eligible.'],
+  ['ShowTestScore', 'FALSE', 'Show students their score right after submitting a test.'],
+  ['SkywardScore', 'percent', 'Skyward export score: percent (Final Percent) or points (raw points).'],
+  ['SolutionLocksQuestion', 'FALSE', 'TRUE freezes a problem\'s answers after the student opens its full solution. FALSE lets them fix it (still costs the bonus).']
+];
+
+var Db = (function () {
+  var ss_ = null;
+  function ss() { return ss_ || (ss_ = SpreadsheetApp.getActive()); }
+
+  function sheet(name) {
+    var sh = ss().getSheetByName(name);
+    if (!sh) {
+      sh = ss().insertSheet(name);
+      sh.getRange(1, 1, 1, SHEETS[name].length).setValues([SHEETS[name]]).setFontWeight('bold').setBackground('#1E2761').setFontColor('#ffffff');
+      sh.setFrozenRows(1);
+    }
+    return sh;
+  }
+
+  function read(name) {
+    var sh = sheet(name), vals = sh.getDataRange().getValues();
+    var head = vals[0], out = [];
+    for (var r = 1; r < vals.length; r++) {
+      var o = { _row: r + 1 };
+      for (var c = 0; c < head.length; c++) o[head[c]] = vals[r][c];
+      out.push(o);
+    }
+    return out;
+  }
+
+  function rowArray(name, obj) {
+    var head = sheet(name).getRange(1, 1, 1, sheet(name).getLastColumn()).getValues()[0];
+    return head.map(function (h) { return obj[h] === undefined ? '' : obj[h]; });
+  }
+
+  function append(name, obj) {
+    var sh = sheet(name);
+    sh.appendRow(rowArray(name, obj));
+    return sh.getLastRow();
+  }
+
+  function update(name, row, obj) {
+    var sh = sheet(name), head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+    var cur = sh.getRange(row, 1, 1, head.length).getValues()[0];
+    head.forEach(function (h, i) { if (obj[h] !== undefined) cur[i] = obj[h]; });
+    sh.getRange(row, 1, 1, head.length).setValues([cur]);
+  }
+
+  function findRow(name, col, value) {
+    var sh = sheet(name), head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+    var ci = head.indexOf(col);
+    if (ci < 0 || sh.getLastRow() < 2) return null;
+    var f = sh.getRange(2, ci + 1, sh.getLastRow() - 1, 1).createTextFinder(String(value)).matchEntireCell(true).findNext();
+    if (!f) return null;
+    var row = f.getRow(), vals = sh.getRange(row, 1, 1, head.length).getValues()[0], o = { _row: row };
+    head.forEach(function (h, i) { o[h] = vals[i]; });
+    return o;
+  }
+
+  function remove(name, row) { sheet(name).deleteRow(row); }
+
+  function replaceAll(name, rows) {
+    var sh = sheet(name), head = SHEETS[name];
+    if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).clearContent();
+    if (rows.length) sh.getRange(2, 1, rows.length, head.length).setValues(rows.map(function (o) { return head.map(function (h) { return o[h] === undefined ? '' : o[h]; }); }));
+  }
+
+  function withLock(fn) {
+    var lock = LockService.getScriptLock();
+    lock.waitLock(20000);
+    try { return fn(); } finally { lock.releaseLock(); }
+  }
+
+  function ensureAll() {
+    Object.keys(SHEETS).forEach(sheet);
+    var have = read('Settings').map(function (r) { return r.Key; });
+    SETTING_DEFAULTS.forEach(function (s) { if (have.indexOf(s[0]) < 0) append('Settings', { Key: s[0], Value: s[1], Notes: s[2] }); });
+    var d = ss().getSheetByName('Sheet1'); if (d && d.getLastRow() === 0 && ss().getSheets().length > 1) ss().deleteSheet(d);
+  }
+
+  return { read: read, append: append, update: update, findRow: findRow, remove: remove, replaceAll: replaceAll, withLock: withLock, ensureAll: ensureAll };
+})();
+
+/** Who is using the page right now, and who owns the script. */
+var Auth = {
+  activeEmail: function () { return String(Session.getActiveUser().getEmail() || '').toLowerCase(); },
+  ownerEmail: function () { return String(Session.getEffectiveUser().getEmail() || '').toLowerCase(); }
+};
+
+;
+/**
+ * Grader.gs
+ * Pure math and answer checking. No Google services are used in this file,
+ * so the same code runs in Apps Script and in local tests.
+ *
+ * Answer types: number, choice, pair, set, inequality, equation, solutions,
+ * graph, written.
+ */
+
+var Grader = (function () {
+
+  // ---------- text normalization ----------
+  var VULGAR = { '½': '1/2', '⅓': '1/3', '⅔': '2/3', '¼': '1/4', '¾': '3/4',
+    '⅕': '1/5', '⅖': '2/5', '⅗': '3/5', '⅘': '4/5', '⅙': '1/6', '⅚': '5/6',
+    '⅛': '1/8', '⅜': '3/8', '⅝': '5/8', '⅞': '7/8' };
+
+  function norm(s) {
+    s = String(s == null ? '' : s);
+    s = s.replace(/[−–—‒]/g, '-')
+         .replace(/≤|=</g, '<=').replace(/≥|=>/g, '>=')
+         .replace(/≠/g, '!=')
+         .replace(/ℓ/g, 'l').replace(/×|·/g, '*').replace(/÷/g, '/')
+         .replace(/ /g, ' ');
+    // 2⅓ -> 2 1/3 ; -⅓ -> -1/3
+    s = s.replace(/(\d)\s*([½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])/g, function (m, d, v) { return d + ' ' + VULGAR[v]; });
+    s = s.replace(/[½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞]/g, function (v) { return VULGAR[v]; });
+    return s.trim();
+  }
+
+  function normWord(s) {
+    return norm(s).toLowerCase().replace(/[^a-z0-9<>=\-\. ]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  // ---------- numbers ----------
+  var UNDEF_WORDS = ['undefined', 'undef', 'und', 'no slope', 'none', 'dne'];
+
+  /** Parse a single number. Accepts -3, 2.5, 3/4, -2 1/5, $1,200, 12.5 hours. */
+  function parseNumber(raw) {
+    var s = norm(raw).toLowerCase();
+    if (!s) return { ok: false };
+    if (UNDEF_WORDS.indexOf(s.replace(/[^a-z ]/g, '').trim()) >= 0 && !/\d/.test(s)) {
+      return { ok: true, undef: true };
+    }
+    s = s.replace(/\$/g, '').replace(/(\d),(?=\d{3}\b)/g, '$1');
+    // drop trailing unit words, e.g. "12.5 hours", "125 mi", "120°c"
+    s = s.replace(/\s*(°\s*[a-z]?|[a-z]+\.?)(\s+[a-z]+\.?)*\s*$/, '').trim();
+    s = s.replace(/^\(\s*(.*)\s*\)$/, '$1').replace(/-\s+/g, '-');
+    var m;
+    if ((m = s.match(/^([+-]?)(\d+)\s+(\d+)\s*\/\s*(\d+)$/))) {           // mixed
+      var den = +m[4]; if (!den) return { ok: false };
+      var v = +m[2] + (+m[3]) / den;
+      return { ok: true, value: m[1] === '-' ? -v : v, form: 'fraction' };
+    }
+    if ((m = s.match(/^([+-]?)\s*(\d*\.?\d+)\s*\/\s*([+-]?)\s*(\d*\.?\d+)$/))) { // a/b
+      var d = +m[4]; if (!d) return { ok: false };
+      var val = (+m[2]) / d;
+      var neg = (m[1] === '-') !== (m[3] === '-');
+      return { ok: true, value: neg ? -val : val, form: 'fraction' };
+    }
+    if ((m = s.match(/^[+-]?(\d+\.?\d*|\.\d+)$/))) {
+      return { ok: true, value: parseFloat(s), form: /\./.test(s) ? 'decimal' : 'integer' };
+    }
+    return { ok: false };
+  }
+
+  function isRepeating(v) {
+    var x = Math.abs(v) * 10000;
+    return Math.abs(x - Math.round(x)) > 1e-7;
+  }
+
+  function numEqual(studentParsed, answerValue) {
+    var tol = 1e-9 + Math.abs(answerValue) * 1e-9;
+    if (studentParsed.form === 'decimal' && isRepeating(answerValue)) tol = 0.006;
+    return Math.abs(studentParsed.value - answerValue) <= tol;
+  }
+
+  function answerNumber(a) {
+    if (typeof a === 'number') return { ok: true, value: a };
+    return parseNumber(a);
+  }
+
+  // ---------- expression parser (linear algebra level) ----------
+  function tokenize(s) {
+    var t = [], i = 0;
+    while (i < s.length) {
+      var c = s[i];
+      if (/\s/.test(c)) { i++; continue; }
+      if (/[0-9.]/.test(c)) {
+        var j = i; while (j < s.length && /[0-9.]/.test(s[j])) j++;
+        t.push({ k: 'n', v: parseFloat(s.slice(i, j)) }); i = j; continue;
+      }
+      if (/[a-zA-Z]/.test(c)) { t.push({ k: 'v', v: c.toLowerCase() }); i++; continue; }
+      if ('+-*/()^'.indexOf(c) >= 0) { t.push({ k: c }); i++; continue; }
+      throw new Error('bad char ' + c);
+    }
+    return t;
+  }
+
+  function parseExpr(str) {
+    var t = tokenize(str), p = 0;
+    function peek() { return t[p]; }
+    function expr() {
+      var n = term();
+      while (peek() && (peek().k === '+' || peek().k === '-')) {
+        var op = t[p++].k, r = term();
+        n = { op: op, a: n, b: r };
+      }
+      return n;
+    }
+    function term() {
+      var n = factor();
+      for (;;) {
+        var k = peek();
+        if (k && (k.k === '*' || k.k === '/')) { p++; n = { op: k.k, a: n, b: factor() }; continue; }
+        if (k && (k.k === 'n' || k.k === 'v' || k.k === '(')) { n = { op: '*', a: n, b: factor() }; continue; }
+        return n;
+      }
+    }
+    function factor() {
+      var k = peek();
+      if (!k) throw new Error('end');
+      if (k.k === '-') { p++; return { op: 'neg', a: factor() }; }
+      if (k.k === '+') { p++; return factor(); }
+      var base = atom();
+      if (peek() && peek().k === '^') { p++; return { op: '^', a: base, b: factor() }; }
+      return base;
+    }
+    function atom() {
+      var k = t[p++];
+      if (k.k === 'n') return { num: k.v };
+      if (k.k === 'v') return { v: k.v };
+      if (k.k === '(') { var e = expr(); if (!t[p] || t[p].k !== ')') throw new Error(')'); p++; return e; }
+      throw new Error('unexpected');
+    }
+    var tree = expr();
+    if (p !== t.length) throw new Error('trailing');
+    return tree;
+  }
+
+  function evalTree(n, env) {
+    if ('num' in n) return n.num;
+    if ('v' in n) { if (!(n.v in env)) throw new Error('unknown var'); return env[n.v]; }
+    switch (n.op) {
+      case 'neg': return -evalTree(n.a, env);
+      case '+': return evalTree(n.a, env) + evalTree(n.b, env);
+      case '-': return evalTree(n.a, env) - evalTree(n.b, env);
+      case '*': return evalTree(n.a, env) * evalTree(n.b, env);
+      case '/': return evalTree(n.a, env) / evalTree(n.b, env);
+      case '^': return Math.pow(evalTree(n.a, env), evalTree(n.b, env));
+    }
+    throw new Error('op');
+  }
+
+  function varsOf(n, set) {
+    set = set || {};
+    if ('v' in n) set[n.v] = true;
+    if (n.a) varsOf(n.a, set);
+    if (n.b) varsOf(n.b, set);
+    return set;
+  }
+
+  /** Clean function notation: f(x) -> y-like single letter so "f(x) = 2x" works. */
+  function stripFuncNotation(s) {
+    return s.replace(/\b([a-z])\s*\(\s*([a-z])\s*\)/gi, function (m, f) { return f; });
+  }
+
+  /**
+   * Parse a linear equation into coefficients over its variables.
+   * Returns {ok, vars:[...], coef:{var:c}, c0, lhsIsSingleVar, lhsVar, rhsVars}
+   */
+  function parseLinearEquation(raw) {
+    var s = stripFuncNotation(norm(raw));
+    var sides = s.split('=');
+    if (sides.length !== 2 || !sides[0].trim() || !sides[1].trim()) return { ok: false };
+    var L, R;
+    try { L = parseExpr(sides[0]); R = parseExpr(sides[1]); } catch (e) { return { ok: false }; }
+    var vs = varsOf(L, {}); varsOf(R, vs);
+    var vars = Object.keys(vs).sort();
+    if (!vars.length) return { ok: false };
+    function f(env) { return evalTree(L, env) - evalTree(R, env); }
+    var zero = {}; vars.forEach(function (v) { zero[v] = 0; });
+    var c0, coef = {};
+    try {
+      c0 = f(zero);
+      vars.forEach(function (v) { var e = Object.assign({}, zero); e[v] = 1; coef[v] = f(e) - c0; });
+      // linearity check at two random points
+      for (var k = 0; k < 2; k++) {
+        var env = {}, pred = c0;
+        vars.forEach(function (v) { env[v] = 1.3 + 2.1 * k + vars.indexOf(v) * 0.7; pred += coef[v] * env[v]; });
+        if (Math.abs(f(env) - pred) > 1e-7 * (1 + Math.abs(pred))) return { ok: false, nonlinear: true };
+      }
+    } catch (e) { return { ok: false }; }
+    if (!isFinite(c0)) return { ok: false };
+    var lhsTrim = sides[0].replace(/\s/g, '');
+    var single = /^[a-z]$/i.test(lhsTrim);
+    var rv = varsOf(R, {});
+    return { ok: true, vars: vars, coef: coef, c0: c0, lhsIsSingleVar: single,
+      lhsVar: single ? lhsTrim.toLowerCase() : null, rhsVars: Object.keys(rv) };
+  }
+
+  function sameLinear(e1, e2) {
+    var vars = {}; e1.vars.concat(e2.vars).forEach(function (v) { vars[v] = 1; });
+    var list = Object.keys(vars);
+    var v1 = list.map(function (v) { return e1.coef[v] || 0; }).concat([e1.c0]);
+    var v2 = list.map(function (v) { return e2.coef[v] || 0; }).concat([e2.c0]);
+    // proportional check
+    var ratio = null;
+    for (var i = 0; i < v1.length; i++) {
+      var a = v1[i], b = v2[i];
+      if (Math.abs(a) < 1e-12 && Math.abs(b) < 1e-12) continue;
+      if (Math.abs(a) < 1e-12 || Math.abs(b) < 1e-12) return false;
+      var r = a / b;
+      if (ratio === null) ratio = r; else if (Math.abs(r - ratio) > 1e-9 * (1 + Math.abs(ratio))) return false;
+    }
+    return ratio !== null;
+  }
+
+  // ---------- inequality / interval ----------
+  /** Parse "0 <= t <= 4", "x >= 0", "y = 4", "4 >= t >= 0" into {lo, loInc, hi, hiInc}. */
+  function parseInterval(raw) {
+    var s = stripFuncNotation(norm(raw)).toLowerCase().replace(/\$/g, '').replace(/(\d),(?=\d{3}\b)/g, '$1');
+    var parts = s.split(/(<=|>=|<|>|=)/).map(function (x) { return x.trim(); });
+    if (parts.length !== 3 && parts.length !== 5) return { ok: false };
+    var items = [], ops = [];
+    for (var i = 0; i < parts.length; i++) (i % 2 ? ops : items).push(parts[i]);
+    var varIdx = -1, nums = [];
+    for (var j = 0; j < items.length; j++) {
+      var n = parseNumber(items[j]);
+      if (n.ok && !n.undef) nums[j] = n.value;
+      else if (/^[a-z]$/.test(items[j])) { if (varIdx >= 0) return { ok: false }; varIdx = j; }
+      else return { ok: false };
+    }
+    if (varIdx < 0) return { ok: false };
+    var r = { ok: true, lo: null, loInc: false, hi: null, hiInc: false, v: items[varIdx] };
+    function apply(numSideLeft, num, op) {
+      // relation reads: (num op var) if numSideLeft, else (var op num)
+      if (op === '=') { r.lo = r.hi = num; r.loInc = r.hiInc = true; return; }
+      var less = op[0] === '<', inc = op.length === 2;
+      var isLower = numSideLeft ? less : !less;
+      if (isLower) { r.lo = num; r.loInc = inc; } else { r.hi = num; r.hiInc = inc; }
+    }
+    if (items.length === 2) apply(varIdx === 1, nums[varIdx === 1 ? 0 : 1], ops[0]);
+    else {
+      if (varIdx !== 1) return { ok: false };
+      apply(true, nums[0], ops[0]);
+      apply(false, nums[2], ops[1]);
+    }
+    if (r.lo !== null && r.hi !== null && r.lo > r.hi) return { ok: false, backwards: true };
+    return r;
+  }
+
+  function sameInterval(a, b) {
+    function eq(x, y) { return (x === null && y === null) || (x !== null && y !== null && Math.abs(x - y) < 1e-9); }
+    return eq(a.lo, b.lo) && eq(a.hi, b.hi) &&
+      (a.lo === null || a.loInc === b.loInc) && (a.hi === null || a.hiInc === b.hiInc);
+  }
+
+  // ---------- pairs / sets ----------
+  function parsePairs(raw) {
+    var s = norm(raw), out = [], re = /\(\s*([^,()]+?)\s*,\s*([^,()]+?)\s*\)/g, m;
+    while ((m = re.exec(s))) {
+      var x = parseNumber(m[1]), y = parseNumber(m[2]);
+      if (!x.ok || !y.ok || x.undef || y.undef) return { ok: false };
+      out.push([x.value, y.value]);
+    }
+    var leftover = s.replace(re, '').replace(/[,;\s]|and/gi, '');
+    if (!out.length || leftover.length) return { ok: false };
+    return { ok: true, pairs: out };
+  }
+
+  function parseSet(raw) {
+    var s = norm(raw).replace(/[{}]/g, '').replace(/\band\b/gi, ',');
+    var bits = s.split(/[,;]|\s+(?=[-+]?\d)/).map(function (x) { return x.trim(); }).filter(Boolean);
+    if (!bits.length) return { ok: false };
+    var vals = [];
+    for (var i = 0; i < bits.length; i++) {
+      var n = parseNumber(bits[i]); if (!n.ok || n.undef) return { ok: false };
+      vals.push(n.value);
+    }
+    return { ok: true, values: vals };
+  }
+
+  // ---------- graph helpers ----------
+  function near(a, b, tol) { return Math.abs(a - b) <= tol; }
+  function hasPoint(list, p, xt, yt) {
+    for (var i = 0; i < list.length; i++) if (near(list[i][0], p[0], xt) && near(list[i][1], p[1], yt)) return true;
+    return false;
+  }
+  function lineFromString(s) { var e = parseLinearEquation(s); return e.ok ? e : null; }
+  function onLine(eq, p) {
+    var x = eq.coef.x || 0, y = eq.coef.y || 0;
+    var val = x * p[0] + y * p[1] + eq.c0;
+    return Math.abs(val) <= 1e-6 * (1 + Math.abs(x) + Math.abs(y)) * (1 + Math.abs(p[0]) + Math.abs(p[1]));
+  }
+  function slopeOf(eq) { var a = eq.coef.x || 0, b = eq.coef.y || 0; return Math.abs(b) < 1e-12 ? null : -a / b; }
+
+  // ---------- grading ----------
+  var FORMAT_MSG = {
+    number: 'Enter a number like -3, 2.5, 3/4, or 2 1/5. Type "undefined" if there is no value.',
+    pair: 'Enter an ordered pair like (3, -2).',
+    set: 'List the values separated by commas, like -1, 0, 2.',
+    inequality: 'Write it like 0 <= x <= 4 or y >= -2. Use the <= and >= buttons if you need them.',
+    equation: 'Write an equation like y = 2x + 1.',
+    solutions: 'Enter ordered pairs separated by commas, like (1, 5), (2, 3).',
+    graph: 'Click points on the grid to plot them.',
+    choice: 'Pick an answer from the list.'
+  };
+
+  function res(status, msg) { return { status: status, msg: msg || '' }; }
+
+  function customMistake(part, check) {
+    var list = part.mistakes || [];
+    for (var i = 0; i < list.length; i++) if (check(list[i])) return list[i].msg;
+    return null;
+  }
+
+  function gradeNumber(part, raw, siblings) {
+    var s = parseNumber(raw);
+    if (!s.ok) return res('invalid', FORMAT_MSG.number);
+    var a = answerNumber(part.answer);
+    if (a.undef) {
+      if (s.undef) return res('correct');
+      if (s.value === 0) return res('incorrect', 'Zero and undefined are different. Zero comes from 0 on top. What happens when the bottom (the run) is 0?');
+      return res('incorrect', customMistake(part, function (m) { return m.value != null && numEqual(s, answerNumber(m.value).value); }) || 'Not quite. Recheck your work step by step.');
+    }
+    if (s.undef) return res('incorrect', 'This one does have a value. Recheck the change in x. Is it really 0?');
+    if (numEqual(s, a.value)) return res('correct');
+    var cm = customMistake(part, function (m) { if (m.value == null) return false; var mv = answerNumber(m.value); return mv.ok && numEqual(s, mv.value); });
+    if (cm) return res('incorrect', cm);
+    if (a.value !== 0 && numEqual(s, -a.value)) return res('incorrect', 'Close. The size is right but check your sign.');
+    if (part.kind === 'slope' && a.value !== 0 && numEqual(s, 1 / a.value)) return res('incorrect', 'Check which change goes on top. Slope is the change in y over the change in x.');
+    if (part.kind === 'slope' && a.value !== 0 && numEqual(s, -1 / a.value)) return res('incorrect', 'Check which change goes on top, and check your sign.');
+    for (var i = 0; i < (siblings || []).length; i++) {
+      var sb = siblings[i];
+      if (sb.type === 'number' && sb.id !== part.id) {
+        var sv = answerNumber(sb.answer);
+        if (sv.ok && !sv.undef && Math.abs(sv.value - a.value) > 1e-9 && numEqual(s, sv.value)) return res('incorrect', 'That number answers a different part of this problem. Reread what this box asks for.');
+      }
+    }
+    return res('incorrect', 'Not quite. Recheck each step of your work.');
+  }
+
+  function gradePair(part, raw) {
+    var p = parsePairs(raw);
+    if (!p.ok || p.pairs.length !== 1) return res('invalid', FORMAT_MSG.pair);
+    var a = parsePairs(part.answer).pairs[0], s = p.pairs[0];
+    if (near(s[0], a[0], 1e-9) && near(s[1], a[1], 1e-9)) return res('correct');
+    if (near(s[0], a[1], 1e-9) && near(s[1], a[0], 1e-9)) return res('incorrect', 'Check the order. The x-coordinate (left/right) comes first, then y (up/down).');
+    if (near(Math.abs(s[0]), Math.abs(a[0]), 1e-9) && near(Math.abs(s[1]), Math.abs(a[1]), 1e-9)) return res('incorrect', 'The distances look right. Check the signs: left and down are negative.');
+    return res('incorrect', customMistake(part, function () { return false; }) || 'Not quite. Start at the origin and count again.');
+  }
+
+  function gradeSet(part, raw) {
+    var p = parseSet(raw);
+    if (!p.ok) return res('invalid', FORMAT_MSG.set);
+    var ans = parseSet(part.answer).values;
+    var got = p.values.slice();
+    var uniq = got.filter(function (v, i) { return got.findIndex(function (w) { return Math.abs(w - v) < 1e-9; }) === i; });
+    var missing = ans.filter(function (v) { return !uniq.some(function (w) { return Math.abs(w - v) < 1e-9; }); }).length;
+    var extra = uniq.filter(function (v) { return !ans.some(function (w) { return Math.abs(w - v) < 1e-9; }); }).length;
+    if (!missing && !extra) return res('correct');
+    if (uniq.length < ans.length) return res('incorrect', 'You need one output for each input in the domain. Count your values.');
+    return res('incorrect', 'Some of your values are off. Substitute each domain value again and recheck the outputs.');
+  }
+
+  function gradeInterval(part, raw) {
+    var p = parseInterval(raw);
+    if (!p.ok) return res(p.backwards ? 'incorrect' : 'invalid', p.backwards ? 'Your smaller number should be on the left side.' : FORMAT_MSG.inequality);
+    var a = parseInterval(part.answer);
+    if (sameInterval(p, a)) return res('correct');
+    var cm = customMistake(part, function (m) { if (!m.interval) return false; var mi = parseInterval(m.interval); return mi.ok && sameInterval(p, mi); });
+    if (cm) return res('incorrect', cm);
+    var endsRight = (p.lo === a.lo || (p.lo !== null && a.lo !== null && Math.abs(p.lo - a.lo) < 1e-9)) &&
+                    (p.hi === a.hi || (p.hi !== null && a.hi !== null && Math.abs(p.hi - a.hi) < 1e-9));
+    if (endsRight) return res('incorrect', 'Your endpoints look right. Check whether each endpoint is included (<= or <).');
+    if ((a.lo === null) !== (p.lo === null) || (a.hi === null) !== (p.hi === null)) return res('incorrect', 'Check which way the values go. Is there a smallest value, a largest value, or both?');
+    return res('incorrect', 'Check your endpoint values. Find the output at the first and last input.');
+  }
+
+  function gradeEquation(part, raw) {
+    var e = parseLinearEquation(raw);
+    if (!e.ok) return res('invalid', FORMAT_MSG.equation);
+    var answers = [].concat(part.answer);
+    var target = parseLinearEquation(answers[0]);
+    var aliasVars = part.varAliases || {};
+    // allow aliases like l for ℓ already handled by norm
+    var ok = answers.some(function (a) { var t = parseLinearEquation(a); return t.ok && sameLinear(e, t); });
+    if (ok) {
+      if (part.solvedFor) {
+        var v = part.solvedFor;
+        if (!(e.lhsIsSingleVar && e.lhsVar === v && e.rhsVars.indexOf(v) < 0)) {
+          return res('incorrect', 'Your equation is equivalent, but this problem wants it solved for ' + v + ': ' + v + ' = (something).');
+        }
+      }
+      return res('correct');
+    }
+    var cm = customMistake(part, function (m) { if (!m.equation) return false; var mm = parseLinearEquation(m.equation); return mm.ok && sameLinear(e, mm); });
+    if (cm) return res('incorrect', cm);
+    var tv = target.vars.join(','), ev = e.vars.join(',');
+    if (tv !== ev) return res('incorrect', 'Check your variables. This problem uses ' + target.vars.join(' and ') + '.');
+    // slope-style diagnostics for two-variable lines
+    if (target.vars.length === 2) {
+      var dv = target.lhsVar || target.vars[1], iv = target.vars.filter(function (x) { return x !== dv; })[0];
+      function mb(q) { var b = q.coef[dv] || 0; if (Math.abs(b) < 1e-12) return null; return { m: -(q.coef[iv] || 0) / b, b: -q.c0 / b }; }
+      var s1 = mb(e), s2 = mb(target);
+      if (s1 && s2) {
+        if (Math.abs(s1.m - s2.m) < 1e-9) return res('incorrect', 'The rate (slope) is right. Check the constant term.');
+        if (Math.abs(s1.b - s2.b) < 1e-9 && Math.abs(s1.m + s2.m) < 1e-9) return res('incorrect', 'Close. Check the sign of the number in front of ' + iv + '.');
+        if (Math.abs(s1.b - s2.b) < 1e-9 && Math.abs(s2.m) > 1e-12 && Math.abs(s1.m * s2.m - 1) < 1e-9) return res('incorrect', 'Check your division. It looks like the ratio got flipped.');
+        if (Math.abs(s1.b - s2.b) < 1e-9) return res('incorrect', 'The constant term is right. Recheck the number in front of ' + iv + '.');
+      }
+    }
+    return res('incorrect', 'Not equivalent yet. Recheck each step.');
+  }
+
+  function gradeSolutions(part, raw) {
+    var p = parsePairs(raw);
+    if (!p.ok) return res('invalid', FORMAT_MSG.solutions);
+    var eq = parseLinearEquation(part.equation);
+    var vars = part.vars || ['x', 'y'];
+    var good = [];
+    var badMsg = null;
+    p.pairs.forEach(function (pr) {
+      var env = {}; env[vars[0]] = pr[0]; env[vars[1]] = pr[1];
+      var val = (eq.coef[vars[0]] || 0) * pr[0] + (eq.coef[vars[1]] || 0) * pr[1] + eq.c0;
+      var fits = Math.abs(val) < 1e-6;
+      if (fits && part.nonneg && (pr[0] < 0 || pr[1] < 0)) { fits = false; badMsg = badMsg || 'You cannot have a negative number of items in this situation.'; }
+      if (fits && part.integer && (Math.abs(pr[0] - Math.round(pr[0])) > 1e-9 || Math.abs(pr[1] - Math.round(pr[1])) > 1e-9)) { fits = false; badMsg = badMsg || 'These are things you count, so use whole numbers.'; }
+      if (fits && !hasPoint(good, pr, 1e-9, 1e-9)) good.push(pr);
+    });
+    var need = part.count || 3;
+    if (good.length >= need) return res('correct');
+    if (badMsg) return res('incorrect', badMsg);
+    return res('incorrect', good.length + ' of your pairs work so far. Substitute each pair into the equation to test it. You need ' + need + ' that work.');
+  }
+
+  function gradeChoice(part, raw) {
+    if (!raw) return res('invalid', FORMAT_MSG.choice);
+    if (normWord(raw) === normWord(part.answer)) return res('correct');
+    var cm = customMistake(part, function (m) { return m.choice && normWord(m.choice) === normWord(raw); });
+    return res('incorrect', cm || 'Not that one. Use the hint button if you are stuck.');
+  }
+
+  function gradeGraph(part, resp) {
+    var pts = (resp && resp.points) || [];
+    if (!pts.length) return res('invalid', FORMAT_MSG.graph);
+    var g = part.grid || {};
+    var xt = (part.xtol != null ? part.xtol : 1e-6), yt = (part.ytol != null ? part.ytol : 1e-6);
+    if (part.mode === 'points') {
+      var ans = part.answer;
+      var right = 0, swapped = 0;
+      pts.forEach(function (p) {
+        if (hasPoint(ans, p, xt, yt)) right++;
+        else if (hasPoint(ans, [p[1], p[0]], xt, yt)) swapped++;
+      });
+      var uniqueRight = ans.filter(function (a) { return hasPoint(pts, a, xt, yt); }).length;
+      if (uniqueRight === ans.length && pts.length === ans.length) return res('correct');
+      if (swapped) return res('incorrect', 'At least one point has x and y switched. Move left/right first, then up/down.');
+      if (pts.length > ans.length) return res('incorrect', 'You have more points than you need. Click a point to remove it.');
+      if (pts.length < ans.length) return res('incorrect', 'You need ' + ans.length + ' point' + (ans.length > 1 ? 's' : '') + '. You have ' + pts.length + '.');
+      return res('incorrect', uniqueRight + ' of your ' + pts.length + ' points are right. Recheck the others.');
+    }
+    // line mode
+    var eq = lineFromString(part.line);
+    var distinct = [];
+    pts.forEach(function (p) { if (!hasPoint(distinct, p, 1e-9, 1e-9)) distinct.push(p); });
+    if (distinct.length < 2) return res('invalid', 'Plot at least two points so the line can be drawn.');
+    var off = distinct.filter(function (p) { return !onLine(eq, p); });
+    if (!off.length) {
+      if (part.domain) {
+        var lo = part.domain.lo, hi = part.domain.hi;
+        var outside = distinct.filter(function (p) { return (lo != null && p[0] < lo - 1e-9) || (hi != null && p[0] > hi + 1e-9); });
+        if (outside.length) return res('incorrect', 'Your points are on the right line, but some are outside the domain. Only graph the inputs the domain allows.');
+        var needEnds = [];
+        if (lo != null) needEnds.push(lo);
+        if (hi != null) needEnds.push(hi);
+        var missingEnd = needEnds.some(function (x0) { return !distinct.some(function (p) { return Math.abs(p[0] - x0) < 1e-9; }); });
+        if (missingEnd) return res('incorrect', 'Right line. Now make sure you plotted the endpoint' + (needEnds.length > 1 ? 's' : '') + ' of the domain.');
+      }
+      if (part.mustInclude) {
+        var miss = part.mustInclude.filter(function (q) { return !hasPoint(distinct, q, 1e-9, 1e-9); });
+        if (miss.length) return res('incorrect', 'Right line. This problem also asks you to mark where the line crosses the axes. Plot those points too.');
+      }
+      return res('correct');
+    }
+    // diagnose using first two plotted points
+    var a = distinct[0], b = distinct[1];
+    if (Math.abs(b[0] - a[0]) < 1e-12) {
+      return res('incorrect', slopeOf(eq) === null ? 'Vertical is right, but check which x-value the line goes through.' : 'Your line is vertical. Recheck the equation: is it really x = a number?');
+    }
+    var sm = (b[1] - a[1]) / (b[0] - a[0]);
+    var tm = slopeOf(eq);
+    var collinear = distinct.every(function (p) { return Math.abs((p[1] - a[1]) - sm * (p[0] - a[0])) < 1e-6; });
+    if (!collinear) return res('incorrect', 'Your points do not all line up. Recheck the y-value you found for each x.');
+    if (tm === null) return res('incorrect', 'This line should be vertical: every point has the same x-value.');
+    var anyOn = distinct.length - off.length;
+    if (Math.abs(sm - tm) < 1e-9) return res('incorrect', 'Your steepness (slope) is right, but the line is shifted. Check where it crosses the y-axis.');
+    if (Math.abs(sm + tm) < 1e-9) return res('incorrect', 'Your line tilts the wrong way. Check the sign of the slope: negative falls left to right.');
+    if (anyOn) return res('incorrect', anyOn + ' of your points ' + (anyOn > 1 ? 'are' : 'is') + ' on the line. Recheck the others.');
+    return res('incorrect', 'None of these points fit the equation yet. Pick an x-value, substitute it, and solve for y.');
+  }
+
+  /**
+   * Grade one part.
+   * @param part    full part spec (with answers)
+   * @param resp    student response (string, or {points:[]} for graph)
+   * @param siblings other parts in the same question
+   */
+  function grade(part, resp, siblings) {
+    try {
+      switch (part.type) {
+        case 'number': return gradeNumber(part, resp, siblings);
+        case 'pair': return gradePair(part, resp);
+        case 'set': return gradeSet(part, resp);
+        case 'inequality': return gradeInterval(part, resp);
+        case 'equation': return gradeEquation(part, resp);
+        case 'solutions': return gradeSolutions(part, resp);
+        case 'choice': return gradeChoice(part, resp);
+        case 'graph': return gradeGraph(part, resp);
+        case 'written': return (resp && String(resp).trim().length >= 3) ? res('pending', 'Saved. Your teacher will read this one.') : res('invalid', 'Write a sentence or two in your own words.');
+      }
+    } catch (e) {
+      return res('invalid', 'That answer could not be read. Check the format and try again.');
+    }
+    return res('invalid', 'Unknown question type.');
+  }
+
+  /** Validate that an assignment's own answer key grades as correct. Used on import. */
+  function selfTest(assignment) {
+    var problems = [];
+    (assignment.questions || []).forEach(function (q) {
+      (q.parts || []).forEach(function (p) {
+        if (p.type === 'written') return;
+        var sample;
+        if (p.type === 'graph') {
+          if (p.mode === 'points') sample = { points: p.answer };
+          else sample = { points: p.samplePoints || p.mustInclude || [] };
+          if (!sample.points.length) return;
+        } else if (p.type === 'solutions') {
+          if (!p.sample) return; sample = p.sample;
+        } else sample = Array.isArray(p.answer) ? p.answer[0] : String(p.answer);
+        var r = grade(p, sample, q.parts);
+        if (r.status !== 'correct') problems.push(q.label + (p.label ? ' ' + p.label : '') + ': ' + r.status + ' ' + r.msg);
+      });
+    });
+    return problems;
+  }
+
+  return {
+    norm: norm, parseNumber: parseNumber, parseLinearEquation: parseLinearEquation,
+    parseInterval: parseInterval, parsePairs: parsePairs, parseSet: parseSet,
+    grade: grade, selfTest: selfTest, FORMAT_MSG: FORMAT_MSG
+  };
+})();
+
+;
+/**
+ * Code.gs
+ * Algebra Coach: assignments with built-in coaching, auto-grading, integrity logging,
+ * test-mode lockout, and Skyward export. Runs as a Google Apps Script web app
+ * bound to a Google Sheet.
+ *
+ * Deploy: Execute as "Me", Who has access "Anyone within [school domain]".
+ */
+
+// ===================================================================
+// Web app entry
+// ===================================================================
+function doGet(e) {
+  Db.ensureAll();
+  var view = (e && e.parameter && e.parameter.view) || '';
+  var file = (view === 'teacher' && isTeacher_(Auth.activeEmail())) ? 'Teacher' : 'Student';
+  var t = HtmlService.createTemplateFromFile(file);
+  t.webAppUrl = ScriptApp.getService().getUrl();
+  t.startAid = String((e && e.parameter && e.parameter.a) || '').replace(/[^\w.\-]/g, '');
+  return t.evaluate()
+    .setTitle(file === 'Teacher' ? 'Algebra Coach | Teacher' : 'Algebra Coach')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1');
+}
+
+function include(name) { return HtmlService.createHtmlOutputFromFile(name).getContent(); }
+
+/** Run once from the editor: builds the tabs and loads the Chapter 4 pilot assignments. */
+function setup() {
+  Db.ensureAll();
+  var owner = Auth.ownerEmail();
+  if (!Db.findRow('Teachers', 'Email', owner)) Db.append('Teachers', { Email: owner, Name: 'Owner' });
+  var report = [];
+  chapter4Assignments_().forEach(function (a) {
+    var problems = Grader.selfTest(a);
+    report.push(a.section + ': ' + a.questions.length + ' questions' + (problems.length ? ', SELF-TEST ISSUES: ' + problems.join(' | ') : ', self-test passed'));
+    // Re-running setup keeps any lesson materials and videos the teacher already added.
+    var old = assignmentRow_(a.id);
+    if (old) { try { a.resources = JSON.parse(old.JSON).resources || a.resources; } catch (e) {} }
+    saveAssignment_(a, true);
+  });
+  Logger.log(report.join('\n'));
+  return report;
+}
+
+// ===================================================================
+// Helpers
+// ===================================================================
+function settings_() {
+  var s = {};
+  Db.read('Settings').forEach(function (r) { s[r.Key] = String(r.Value); });
+  return {
+    checksPerPart: +s.ChecksPerPart || 3,
+    bonusMaxLeaves: s.BonusMaxLeaves === '' ? 1 : +s.BonusMaxLeaves,
+    awayThresholdMs: (+s.AwayThresholdSeconds || 3) * 1000,
+    lockAfterLeaves: +s.LockAfterLeaves || 2,
+    bonusMultiplier: +s.BonusMultiplier || 1.1,
+    showTestScore: String(s.ShowTestScore).toUpperCase() === 'TRUE',
+    skywardScore: s.SkywardScore === 'points' ? 'points' : 'percent',
+    solutionLocks: String(s.SolutionLocksQuestion).toUpperCase() === 'TRUE'
+  };
+}
+
+function isTeacher_(email) {
+  if (!email) return false;
+  if (email === Auth.ownerEmail()) return true;
+  return Db.read('Teachers').some(function (t) { return String(t.Email).toLowerCase() === email; });
+}
+function requireTeacher_() {
+  var e = Auth.activeEmail();
+  if (!isTeacher_(e)) throw new Error('Teacher access only.');
+  return e;
+}
+
+function student_(email) {
+  var r = Db.findRow('Roster', 'Email', email);
+  if (!r) {
+    // TextFinder is case sensitive on some sheets; fall back to a full scan.
+    r = Db.read('Roster').filter(function (x) { return String(x.Email).toLowerCase() === email; })[0];
+  }
+  return r || null;
+}
+
+function assignmentRow_(id) { return Db.findRow('Assignments', 'ID', id); }
+
+function loadAssignment_(id) {
+  var row = assignmentRow_(id);
+  if (!row) throw new Error('Assignment not found.');
+  var a = JSON.parse(row.JSON);
+  a.status = row.Status || 'closed';
+  a.mode = row.Mode || 'practice';
+  a.calculator = row.Calculator || a.calculator || 'basic';
+  a.checksPerPart = +row['Checks Per Part'] || null;
+  a.lockAfterLeaves = +row['Lock After Leaves'] || null;
+  a.due = row.Due ? String(row.Due) : '';
+  return a;
+}
+
+function saveAssignment_(a, keepSettingsIfExists) {
+  var row = assignmentRow_(a.id);
+  var json = JSON.stringify(stripRuntime_(a));
+  if (json.length > 49000) throw new Error('This assignment is too large for one Sheet cell (' + json.length + ' characters). Split it into two assignments.');
+  var rec = { ID: a.id, Section: a.section || '', Title: a.title || '', Updated: new Date(), JSON: json };
+  if (row) {
+    if (!keepSettingsIfExists) { rec.Calculator = a.calculator || 'basic'; }
+    Db.update('Assignments', row._row, rec);
+  } else {
+    rec.Status = a.status || 'closed'; rec.Mode = a.mode || 'practice'; rec.Calculator = a.calculator || 'basic';
+    rec['Checks Per Part'] = ''; rec['Lock After Leaves'] = ''; rec.Due = '';
+    Db.append('Assignments', rec);
+  }
+}
+
+function stripRuntime_(a) {
+  var c = JSON.parse(JSON.stringify(a));
+  ['status', 'mode', 'checksPerPart', 'lockAfterLeaves', 'due'].forEach(function (k) { delete c[k]; });
+  return c;
+}
+
+/** Strip everything a student must not see: answers, hints, mistake messages, sample answers. */
+var SAFE_PART_KEYS = ['id', 'label', 'type', 'options', 'grid', 'mode', 'extent', 'domain', 'vars', 'count'];
+function studentView_(a) {
+  return {
+    id: a.id, section: a.section, title: a.title, pages: a.pages, course: a.course, mode: a.mode,
+    calculator: a.calculator, due: a.due,
+    resources: a.mode === 'test' ? [] : (a.resources || []).map(function (r) { return { title: r.title, url: r.url, kind: r.kind || 'link', group: r.group || '' }; }),
+    questions: a.questions.map(function (q) {
+      return {
+        id: q.id, label: q.label, group: q.group, prompt: q.prompt, figure: q.figure || null, table: q.table || null,
+        note: q.note || '', fromPresentation: q.fromPresentation || '', hintCount: (q.hints || []).length,
+        image: q.image ? { key: q.image.key, alt: q.image.alt || '' } : null, hasSolution: !!(q.solution && q.solution.length),
+        search: a.mode === 'test' ? '' : (q.search || ('algebra 1 ' + (q.group || a.title || ''))),
+        parts: q.parts.map(function (p) {
+          var o = {};
+          SAFE_PART_KEYS.forEach(function (k) { if (p[k] !== undefined) o[k] = p[k]; });
+          if (p.type === 'graph' && p.mode === 'points') o.pointCount = p.answer.length;
+          return o;
+        })
+      };
+    })
+  };
+}
+
+function attemptKey_(email, aid) { return email + '|' + aid; }
+
+function newState_() {
+  return { answers: {}, results: {}, checks: {}, hints: {}, attempted: {}, revealed: {},
+    integrity: { leaves: 0, awayMs: 0, pastes: 0, copies: 0, fastCorrect: 0, lockouts: 0, opens: 0, solutions: 0 }, started: new Date().toISOString() };
+}
+
+function getAttempt_(email, aid) {
+  var row = Db.findRow('Attempts', 'Key', attemptKey_(email, aid));
+  if (!row) return null;
+  var st = JSON.parse(row.State || '{}');
+  st.revealed = st.revealed || {}; st.integrity = st.integrity || {}; st.integrity.solutions = st.integrity.solutions || 0;
+  return { row: row._row, status: row.Status, state: st };
+}
+
+function putAttempt_(email, aid, status, state, row) {
+  var rec = { Key: attemptKey_(email, aid), Email: email, Assignment: aid, Status: status, Updated: new Date(), State: JSON.stringify(state) };
+  if (row) Db.update('Attempts', row, rec); else Db.append('Attempts', rec);
+}
+
+function logEvent_(email, aid, type, detail) {
+  Db.append('Events', { Time: new Date(), Email: email, Assignment: aid, Type: type, Detail: detail || '' });
+}
+
+function findPart_(a, qid, pid) {
+  var q = a.questions.filter(function (x) { return x.id === qid; })[0];
+  if (!q) throw new Error('Question not found.');
+  var p = q.parts.filter(function (x) { return x.id === pid; })[0];
+  if (!p) throw new Error('Part not found.');
+  return { q: q, p: p };
+}
+
+/** Apply integrity events sent by the page. Returns true if the attempt should lock. */
+function applyEvents_(email, a, st, events, cfg) {
+  var lockAfter = a.lockAfterLeaves || cfg.lockAfterLeaves;
+  (events || []).slice(0, 50).forEach(function (ev) {
+    var I = st.integrity;
+    if (ev.type === 'leave') {
+      var ms = Math.max(0, Math.min(+ev.ms || 0, 3600000));
+      if (ev.reason === 'resource' && a.mode !== 'test') {
+        // Leaving to watch a help video or search YouTube from the Coach: logged, not counted against the bonus.
+        if (ms >= 1000) logEvent_(email, a.id, 'opened help link', Math.round(ms / 1000) + ' s' + (ev.where ? ' (' + String(ev.where).slice(0, 80) + ')' : ''));
+        return;
+      }
+      var counts = a.mode === 'test' ? ms >= 1000 || ev.reason === 'fullscreen' : ms >= cfg.awayThresholdMs;
+      if (counts) { I.leaves++; I.awayMs += ms; logEvent_(email, a.id, 'left page', Math.round(ms / 1000) + ' s' + (ev.reason ? ' (' + ev.reason + ')' : '')); }
+    } else if (ev.type === 'paste') { I.pastes++; logEvent_(email, a.id, 'paste blocked', ev.where || ''); }
+    else if (ev.type === 'copy') { I.copies++; }
+  });
+  return a.mode === 'test' && st.integrity.leaves >= lockAfter;
+}
+
+// ===================================================================
+// Student API
+// ===================================================================
+function api_bootstrap() {
+  var email = Auth.activeEmail();
+  var teacher = isTeacher_(email);
+  var stu = student_(email);
+  if (!stu && !teacher) return { email: email, role: 'none' };
+  var subs = Db.read('Submissions').filter(function (s) { return String(s.Email).toLowerCase() === email; });
+  var atts = Db.read('Attempts').filter(function (x) { return String(x.Email).toLowerCase() === email; });
+  var list = Db.read('Assignments').filter(function (r) { return r.Status === 'open' || teacher; }).map(function (r) {
+    var sub = subs.filter(function (s) { return s.Assignment === r.ID; }).pop();
+    var att = atts.filter(function (x) { return x.Assignment === r.ID; })[0];
+    return { id: r.ID, section: r.Section, title: r.Title, mode: r.Mode || 'practice', status: r.Status, due: r.Due ? String(r.Due) : '',
+      state: sub ? 'submitted' : (att ? att.Status : 'new') };
+  });
+  return { email: email, role: teacher ? 'teacher' : 'student', name: stu ? stu['First Name'] : '', assignments: list };
+}
+
+function api_open(aid) {
+  var email = Auth.activeEmail();
+  var teacher = isTeacher_(email);
+  if (!student_(email) && !teacher) throw new Error('You are not on the class roster. Ask your teacher to add you.');
+  var a = loadAssignment_(aid);
+  if (a.status !== 'open' && !teacher) throw new Error('This assignment is closed.');
+  var cfg = settings_();
+  return Db.withLock(function () {
+    var att = getAttempt_(email, aid);
+    var submitted = Db.read('Submissions').some(function (s) { return String(s.Email).toLowerCase() === email && s.Assignment === aid; });
+    var st = att ? att.state : newState_();
+    var status = submitted ? 'submitted' : (att ? att.status : 'active');
+    if (status === 'active') {
+      st.integrity.opens = (st.integrity.opens || 0) + 1;
+      // Reopening a test that was already started counts as leaving the page.
+      if (a.mode === 'test' && att && st.integrity.opens > 1) {
+        st.integrity.leaves++; logEvent_(email, aid, 'reopened test', '');
+        if (st.integrity.leaves >= (a.lockAfterLeaves || cfg.lockAfterLeaves)) { status = 'locked'; st.integrity.lockouts++; logEvent_(email, aid, 'LOCKED', 'reopened'); }
+      }
+      putAttempt_(email, aid, status, st, att && att.row);
+    }
+    var hintsShown = {};
+    Object.keys(st.hints).forEach(function (qid) {
+      var q = a.questions.filter(function (x) { return x.id === qid; })[0];
+      if (q) hintsShown[qid] = q.hints.slice(0, st.hints[qid]);
+    });
+    var revealed = {};
+    Object.keys(st.revealed || {}).forEach(function (qid) {
+      var q = a.questions.filter(function (x) { return x.id === qid; })[0];
+      if (q) revealed[qid] = q.solution || [];
+    });
+    return {
+      assignment: studentView_(a), status: status, answers: st.answers, results: a.mode === 'test' ? {} : st.results,
+      checks: st.checks, hints: hintsShown, revealed: revealed, solutionLocks: cfg.solutionLocks,
+      checksPerPart: a.checksPerPart || cfg.checksPerPart,
+      lockAfterLeaves: a.lockAfterLeaves || cfg.lockAfterLeaves, leaves: st.integrity.leaves
+    };
+  });
+}
+
+function api_check(aid, qid, pid, response, meta) {
+  var email = Auth.activeEmail();
+  var a = loadAssignment_(aid);
+  if (a.mode === 'test') throw new Error('Answer checking is off during a test.');
+  var cfg = settings_(), limit = a.checksPerPart || cfg.checksPerPart;
+  var f = findPart_(a, qid, pid);
+  return Db.withLock(function () {
+    var att = getAttempt_(email, aid);
+    if (!att || att.status !== 'active') return { status: 'blocked', msg: 'This assignment is not active.' };
+    var st = att.state, key = qid + '.' + pid;
+    if (st.revealed[qid] && cfg.solutionLocks) return { status: 'blocked', msg: 'You opened the full solution for this problem, so its answers are locked.' };
+    var r = Grader.grade(f.p, response, f.q.parts);
+    st.answers[key] = response;
+    if (r.status === 'invalid') { putAttempt_(email, aid, att.status, st, att.row); r.checksLeft = limit - (st.checks[key] || 0); return r; }
+    if ((st.checks[key] || 0) >= limit && st.results[key] !== 'correct') {
+      return { status: 'limit', msg: 'No checks left on this box. Use the coach, rework it on paper, and submit your best answer.', checksLeft: 0 };
+    }
+    st.checks[key] = (st.checks[key] || 0) + 1;
+    st.results[key] = r.status;
+    st.attempted[qid] = true;
+    if (r.status === 'correct' && meta && +meta.msSinceShown < 8000 && +meta.keys < 2 &&
+        ['number', 'equation', 'inequality', 'pair', 'set', 'solutions'].indexOf(f.p.type) >= 0) {
+      st.integrity.fastCorrect++; logEvent_(email, aid, 'fast correct', key + ' in ' + Math.round(meta.msSinceShown / 1000) + ' s, ' + meta.keys + ' keys');
+    }
+    putAttempt_(email, aid, att.status, st, att.row);
+    r.checksLeft = limit - st.checks[key];
+    if (r.status === 'incorrect' && st.checks[key] >= 2 && (st.hints[qid] || 0) === 0 && f.q.hints && f.q.hints.length) {
+      r.nudge = 'Try the Coach button for a hint. It will not give you the answer.';
+    }
+    return r;
+  });
+}
+
+function api_hint(aid, qid) {
+  var email = Auth.activeEmail();
+  var a = loadAssignment_(aid);
+  if (a.mode === 'test') throw new Error('The coach is off during a test.');
+  var q = a.questions.filter(function (x) { return x.id === qid; })[0];
+  if (!q || !q.hints || !q.hints.length) return { hints: [], done: true };
+  return Db.withLock(function () {
+    var att = getAttempt_(email, aid);
+    if (!att || att.status !== 'active') return { hints: [], done: true };
+    var st = att.state, level = st.hints[qid] || 0;
+    if (level >= q.hints.length) return { hints: q.hints.slice(0, level), done: true };
+    // The worked example (last hint) unlocks only after the student has tried the problem once.
+    if (level === q.hints.length - 1 && !st.attempted[qid]) {
+      return { hints: q.hints.slice(0, level), done: false, msg: 'Give it a try and check your answer once. Then the coach will show you a worked example.' };
+    }
+    st.hints[qid] = level + 1;
+    putAttempt_(email, aid, att.status, st, att.row);
+    return { hints: q.hints.slice(0, level + 1), done: level + 1 >= q.hints.length };
+  });
+}
+
+/** Autosave. Also receives integrity events. Returns lock state. */
+function api_save(aid, answers, events) {
+  var email = Auth.activeEmail();
+  var a = loadAssignment_(aid), cfg = settings_();
+  return Db.withLock(function () {
+    var att = getAttempt_(email, aid);
+    if (!att) return { status: 'missing' };
+    if (att.status !== 'active') return { status: att.status };
+    var st = att.state;
+    mergeAnswers_(st, answers, cfg);
+    var lock = applyEvents_(email, a, st, events, cfg);
+    var status = att.status;
+    if (lock) { status = 'locked'; st.integrity.lockouts++; logEvent_(email, aid, 'LOCKED', 'left page ' + st.integrity.leaves + ' times'); }
+    putAttempt_(email, aid, status, st, att.row);
+    return { status: status, leaves: st.integrity.leaves, lockAfter: a.lockAfterLeaves || cfg.lockAfterLeaves };
+  });
+}
+
+/** Copy answers from the page, skipping problems frozen by a solution reveal. */
+function mergeAnswers_(st, answers, cfg) {
+  Object.keys(answers || {}).forEach(function (k) {
+    var qid = k.split('.')[0], v = answers[k];
+    if (/\.__work$/.test(k)) {
+      // On-screen work lines: always saved, never graded. Capped in size.
+      st.answers[k] = (Array.isArray(v) ? v : []).slice(0, 40).map(function (x) { return String(x == null ? '' : x).slice(0, 200); });
+      return;
+    }
+    if (cfg.solutionLocks && st.revealed && st.revealed[qid]) return;
+    st.answers[k] = v;
+  });
+}
+
+/**
+ * Full worked solution for one problem. Allowed only in practice mode, after the student has opened every
+ * hint and used all checks on at least one answer box without getting it right. Costs the no-AI bonus.
+ */
+function api_solution(aid, qid, answers) {
+  var email = Auth.activeEmail();
+  var a = loadAssignment_(aid), cfg = settings_();
+  if (a.mode === 'test') throw new Error('Solutions are off during a test.');
+  var q = a.questions.filter(function (x) { return x.id === qid; })[0];
+  if (!q || !q.solution || !q.solution.length) throw new Error('No solution is available for this problem.');
+  var limit = a.checksPerPart || cfg.checksPerPart;
+  return Db.withLock(function () {
+    var att = getAttempt_(email, aid);
+    if (!att || att.status !== 'active') throw new Error('This assignment is not active.');
+    var st = att.state;
+    if (st.revealed[qid]) return { steps: q.solution, locked: cfg.solutionLocks };
+    var hintsDone = (st.hints[qid] || 0) >= (q.hints || []).length;
+    var outOfChecks = q.parts.some(function (p) {
+      var k = qid + '.' + p.id;
+      return p.type !== 'written' && (st.checks[k] || 0) >= limit && st.results[k] !== 'correct';
+    });
+    if (!hintsDone || !outOfChecks) {
+      return { denied: true, msg: 'The full solution opens after you use every Coach hint and all ' + limit + ' checks on an answer box.' };
+    }
+    // Save what is on screen for this problem before freezing it.
+    Object.keys(answers || {}).forEach(function (k) { if (k.split('.')[0] === qid) st.answers[k] = answers[k]; });
+    st.revealed[qid] = new Date().toISOString();
+    st.integrity.solutions = (st.integrity.solutions || 0) + 1;
+    putAttempt_(email, aid, att.status, st, att.row);
+    logEvent_(email, aid, 'viewed full solution', q.label);
+    return { steps: q.solution, locked: cfg.solutionLocks };
+  });
+}
+
+// ---------------- pictures ----------------
+function api_image(key) {
+  var email = Auth.activeEmail();
+  if (!isTeacher_(email) && !student_(email)) throw new Error('Not on the roster.');
+  key = String(key || '');
+  if (typeof BUILTIN_IMAGES !== 'undefined' && BUILTIN_IMAGES[key]) {
+    var b = BUILTIN_IMAGES[key];
+    return 'data:' + b.mime + ';base64,' + b.data;
+  }
+  var cache = CacheService.getScriptCache(), hit = cache.get('img_' + key);
+  if (hit) return hit;
+  // Uploaded pictures are stored in the Images tab, split into chunks (a cell holds at most 50,000 characters).
+  var rows = Db.read('Images').filter(function (r) { return r.Key === key; }).sort(function (x, y) { return x.Part - y.Part; });
+  if (!rows.length) throw new Error('Picture not found.');
+  var url = 'data:' + rows[0].Mime + ';base64,' + rows.map(function (r) { return r.Data; }).join('');
+  if (url.length < 95000) cache.put('img_' + key, url, 21600);
+  return url;
+}
+
+/** Teacher uploads a picture (data URL from the page, already shrunk to 1400 px JPEG). Stored in the Images tab. */
+function t_uploadImage(dataUrl, name) {
+  requireTeacher_();
+  var m = String(dataUrl).match(/^data:(image\/(png|jpeg|gif|webp));base64,([A-Za-z0-9+\/=]+)$/);
+  if (!m) throw new Error('Upload a PNG, JPEG, GIF, or WEBP picture.');
+  if (m[3].length > 2500000) throw new Error('Picture is too large. Use a smaller picture.');
+  var key = 'img-' + Utilities.getUuid().slice(0, 8), CH = 45000, now = new Date();
+  for (var i = 0, part = 0; i < m[3].length; i += CH, part++) {
+    Db.append('Images', { Key: key, Part: part, Mime: m[1], Name: name || '', Uploaded: now, Data: m[3].slice(i, i + CH) });
+  }
+  return { key: key };
+}
+
+function scoreAttempt_(a, st) {
+  var auto = 0, writtenMax = 0, max = 0, detail = {};
+  a.questions.forEach(function (q) {
+    var pts = q.points || 1, n = q.parts.length;
+    max += pts;
+    q.parts.forEach(function (p) {
+      var key = q.id + '.' + p.id, share = pts / n;
+      if (p.type === 'written') { writtenMax += share; detail[key] = 'pending'; return; }
+      var resp = st.answers[key];
+      var r = (resp === undefined || resp === '' || resp === null) ? { status: 'blank' } : Grader.grade(p, resp, q.parts);
+      detail[key] = r.status === 'correct' ? 'correct' : (r.status === 'blank' ? 'blank' : 'incorrect');
+      if (r.status === 'correct') auto += share;
+    });
+  });
+  return { auto: round2_(auto), writtenMax: round2_(writtenMax), max: max, detail: detail };
+}
+function round2_(x) { return Math.round(x * 100) / 100; }
+
+function api_submit(aid, answers, events) {
+  var email = Auth.activeEmail();
+  var a = loadAssignment_(aid), cfg = settings_();
+  return Db.withLock(function () {
+    var att = getAttempt_(email, aid);
+    if (!att) throw new Error('Nothing to submit.');
+    if (att.status === 'submitted') return { status: 'submitted' };
+    var st = att.state;
+    if (att.status === 'active') mergeAnswers_(st, answers, cfg);
+    applyEvents_(email, a, st, events, cfg);
+    var sc = scoreAttempt_(a, st);
+    var I = st.integrity;
+    var hintsUsed = Object.keys(st.hints).reduce(function (s, k) { return s + st.hints[k]; }, 0);
+    var eligible = I.pastes === 0 && I.leaves <= cfg.bonusMaxLeaves && I.lockouts === 0 && !(I.solutions > 0);
+    var pct = sc.max ? sc.auto / sc.max * 100 : 0;
+    var stu = student_(email) || {};
+    Db.append('Submissions', {
+      Submitted: new Date(), Email: email, 'Last Name': stu['Last Name'] || '', 'First Name': stu['First Name'] || '',
+      'Student ID': stu['Student ID'] || '', Period: stu.Period || '', Assignment: aid, Mode: a.mode,
+      'Auto Points': sc.auto, 'Written Points': sc.writtenMax ? '' : 0, 'Written Max': sc.writtenMax, 'Max Points': sc.max,
+      Percent: round2_(pct), 'No-AI Bonus Eligible': eligible ? 'YES' : 'NO',
+      'Final Percent': round2_(pct * (eligible ? cfg.bonusMultiplier : 1)),
+      'Hints Used': hintsUsed, 'Paste Attempts': I.pastes, 'Times Left Page': I.leaves, 'Seconds Away': Math.round(I.awayMs / 1000),
+      'Fast Answers': I.fastCorrect, Lockouts: I.lockouts, 'Solutions Viewed': I.solutions || 0,
+      Answers: JSON.stringify({ answers: st.answers, detail: sc.detail, revealed: Object.keys(st.revealed || {}) })
+    });
+    putAttempt_(email, aid, 'submitted', st, att.row);
+    var showScore = a.mode !== 'test' || cfg.showTestScore;
+    return { status: 'submitted', score: showScore ? { auto: sc.auto, max: sc.max, writtenMax: sc.writtenMax } : null,
+      detail: a.mode === 'test' ? null : sc.detail };
+  });
+}
+
+// ===================================================================
+// Teacher API
+// ===================================================================
+function t_overview() {
+  requireTeacher_();
+  var subs = Db.read('Submissions'), atts = Db.read('Attempts'), roster = Db.read('Roster');
+  return {
+    settings: settings_(),
+    rosterCount: roster.length,
+    assignments: Db.read('Assignments').map(function (r) {
+      return { id: r.ID, section: r.Section, title: r.Title, status: r.Status, mode: r.Mode, calculator: r.Calculator,
+        checks: r['Checks Per Part'], lockAfter: r['Lock After Leaves'], due: r.Due ? String(r.Due) : '',
+        submitted: subs.filter(function (s) { return s.Assignment === r.ID; }).length,
+        inProgress: atts.filter(function (x) { return x.Assignment === r.ID && x.Status === 'active'; }).length,
+        locked: atts.filter(function (x) { return x.Assignment === r.ID && x.Status === 'locked'; }).length };
+    })
+  };
+}
+
+function t_setAssignment(aid, fields) {
+  requireTeacher_();
+  var row = assignmentRow_(aid);
+  if (!row) throw new Error('Not found');
+  var rec = {};
+  if (fields.status) rec.Status = fields.status === 'open' ? 'open' : 'closed';
+  if (fields.mode) rec.Mode = fields.mode === 'test' ? 'test' : 'practice';
+  if (fields.calculator) rec.Calculator = ['graphing', 'basic', 'off'].indexOf(fields.calculator) >= 0 ? fields.calculator : 'basic';
+  if (fields.checks !== undefined) rec['Checks Per Part'] = fields.checks;
+  if (fields.lockAfter !== undefined) rec['Lock After Leaves'] = fields.lockAfter;
+  if (fields.due !== undefined) rec.Due = fields.due;
+  Db.update('Assignments', row._row, rec);
+  return t_overview();
+}
+
+function t_students(aid) {
+  requireTeacher_();
+  var a = loadAssignment_(aid);
+  var roster = Db.read('Roster'), subs = Db.read('Submissions').filter(function (s) { return s.Assignment === aid; });
+  var atts = Db.read('Attempts').filter(function (x) { return x.Assignment === aid; });
+  var rows = roster.map(function (st) {
+    var em = String(st.Email).toLowerCase();
+    var sub = subs.filter(function (s) { return String(s.Email).toLowerCase() === em; }).pop();
+    var att = atts.filter(function (x) { return String(x.Email).toLowerCase() === em; })[0];
+    var I = att ? (JSON.parse(att.State || '{}').integrity || {}) : {};
+    return { email: em, last: st['Last Name'], first: st['First Name'], id: st['Student ID'], period: st.Period,
+      state: sub ? 'submitted' : (att ? att.Status : 'not started'),
+      sub: sub ? { row: sub._row, auto: sub['Auto Points'], written: sub['Written Points'], writtenMax: sub['Written Max'], max: sub['Max Points'],
+        percent: sub.Percent, eligible: sub['No-AI Bonus Eligible'], final: sub['Final Percent'], hints: sub['Hints Used'] } : null,
+      integrity: sub ? { pastes: sub['Paste Attempts'], leaves: sub['Times Left Page'], away: sub['Seconds Away'], fast: sub['Fast Answers'], lockouts: sub.Lockouts, solutions: sub['Solutions Viewed'] || 0 }
+        : { pastes: I.pastes || 0, leaves: I.leaves || 0, away: Math.round((I.awayMs || 0) / 1000), fast: I.fastCorrect || 0, lockouts: I.lockouts || 0, solutions: I.solutions || 0 } };
+  });
+  rows.sort(function (x, y) { return String(x.last).localeCompare(String(y.last)); });
+  return { assignment: { id: a.id, title: a.title, section: a.section, mode: a.mode }, rows: rows };
+}
+
+/** Full view of one student's work, including written answers next to the sample answers. */
+function t_review(aid, email) {
+  requireTeacher_();
+  var a = loadAssignment_(aid);
+  var sub = Db.read('Submissions').filter(function (s) { return s.Assignment === aid && String(s.Email).toLowerCase() === email; }).pop();
+  var att = getAttempt_(email, aid);
+  var data = sub ? JSON.parse(sub.Answers) : { answers: att ? att.state.answers : {}, detail: att ? scoreAttempt_(a, att.state).detail : {} };
+  return { assignment: a, answers: data.answers, detail: data.detail, written: sub ? sub['Written Points'] : '', writtenMax: sub ? sub['Written Max'] : 0,
+    hints: att ? att.state.hints : {}, checks: att ? att.state.checks : {}, revealed: att ? Object.keys(att.state.revealed || {}) : [] };
+}
+
+function t_setWritten(aid, email, points) {
+  requireTeacher_();
+  var cfg = settings_();
+  return Db.withLock(function () {
+    var sub = Db.read('Submissions').filter(function (s) { return s.Assignment === aid && String(s.Email).toLowerCase() === email; }).pop();
+    if (!sub) throw new Error('No submission.');
+    var w = Math.max(0, Math.min(+points || 0, +sub['Written Max'] || 0));
+    var pct = (+sub['Auto Points'] + w) / (+sub['Max Points']) * 100;
+    Db.update('Submissions', sub._row, { 'Written Points': w, Percent: round2_(pct),
+      'Final Percent': round2_(pct * (sub['No-AI Bonus Eligible'] === 'YES' ? cfg.bonusMultiplier : 1)) });
+    return true;
+  });
+}
+
+function t_setBonus(aid, email, yes) {
+  requireTeacher_();
+  var cfg = settings_();
+  var sub = Db.read('Submissions').filter(function (s) { return s.Assignment === aid && String(s.Email).toLowerCase() === email; }).pop();
+  if (!sub) throw new Error('No submission.');
+  Db.update('Submissions', sub._row, { 'No-AI Bonus Eligible': yes ? 'YES' : 'NO', 'Final Percent': round2_(+sub.Percent * (yes ? cfg.bonusMultiplier : 1)) });
+  return true;
+}
+
+function t_unlock(aid, email) {
+  var t = requireTeacher_();
+  return Db.withLock(function () {
+    var att = getAttempt_(email, aid);
+    if (!att) throw new Error('No attempt found.');
+    att.state.integrity.leaves = 0;
+    att.state.integrity.opens = 0;
+    putAttempt_(email, aid, 'active', att.state, att.row);
+    logEvent_(email, aid, 'unlocked', 'by ' + t);
+    return true;
+  });
+}
+
+/** Let a student redo work: removes the submission and reactivates the attempt (answers kept). */
+function t_reopen(aid, email, clearAnswers) {
+  var t = requireTeacher_();
+  return Db.withLock(function () {
+    var subs = Db.read('Submissions').filter(function (s) { return s.Assignment === aid && String(s.Email).toLowerCase() === email; });
+    subs.sort(function (x, y) { return y._row - x._row; }).forEach(function (s) { Db.remove('Submissions', s._row); });
+    var att = getAttempt_(email, aid);
+    if (att) {
+      var st = clearAnswers ? newState_() : att.state;
+      st.integrity.leaves = 0; st.integrity.opens = 0;
+      putAttempt_(email, aid, 'active', st, att.row);
+    }
+    logEvent_(email, aid, 'reopened by teacher', t);
+    return true;
+  });
+}
+
+function t_events(aid, email) {
+  requireTeacher_();
+  return Db.read('Events').filter(function (e) { return e.Assignment === aid && (!email || String(e.Email).toLowerCase() === email); })
+    .map(function (e) { return { time: String(e.Time), email: e.Email, type: e.Type, detail: e.Detail }; }).slice(-300);
+}
+
+function t_getAssignment(aid) { requireTeacher_(); return loadAssignment_(aid); }
+
+/** Replace an assignment's lesson materials and videos. Each: {title, url, kind: slides|notes|video|link, group}. */
+function t_setResources(aid, list) {
+  requireTeacher_();
+  var a = loadAssignment_(aid);
+  a.resources = (list || []).filter(function (r) { return r && /^https:\/\//i.test(String(r.url || '')); }).slice(0, 60).map(function (r) {
+    return { title: String(r.title || 'Resource').slice(0, 120), url: String(r.url).slice(0, 500),
+      kind: ['slides', 'notes', 'video', 'link'].indexOf(r.kind) >= 0 ? r.kind : 'link', group: String(r.group || '').slice(0, 80) };
+  });
+  saveAssignment_(a, true);
+  return a.resources;
+}
+
+/** Import or replace an assignment from JSON. Runs the answer self-test first. */
+function t_import(json, overwrite) {
+  requireTeacher_();
+  var a = typeof json === 'string' ? JSON.parse(json) : json;
+  var errs = validateAssignment_(a);
+  if (errs.length) return { ok: false, errors: errs };
+  var problems = Grader.selfTest(a);
+  if (problems.length) return { ok: false, errors: ['Answer key self-test failed:'].concat(problems) };
+  if (a.resources && !Array.isArray(a.resources)) return { ok: false, errors: ['resources must be a list.'] };
+  if (assignmentRow_(a.id) && !overwrite) return { ok: false, exists: true, errors: ['An assignment with ID "' + a.id + '" already exists. Import again with Replace checked.'] };
+  saveAssignment_(a, false);
+  return { ok: true, id: a.id, questions: a.questions.length };
+}
+
+function validateAssignment_(a) {
+  var e = [];
+  var TYPES = ['number', 'choice', 'pair', 'set', 'inequality', 'equation', 'solutions', 'graph', 'written'];
+  if (!a || typeof a !== 'object') return ['Not an assignment object.'];
+  if (!a.id || !/^[\w.\-]+$/.test(a.id)) e.push('id is required (letters, numbers, dot, dash).');
+  if (!a.title) e.push('title is required.');
+  if (!Array.isArray(a.questions) || !a.questions.length) e.push('questions must be a non-empty list.');
+  var qids = {};
+  (a.questions || []).forEach(function (q, i) {
+    var w = 'Question ' + (q.label || i + 1) + ': ';
+    if (!q.id) e.push(w + 'id missing.'); else if (qids[q.id]) e.push(w + 'duplicate id ' + q.id); qids[q.id] = 1;
+    if (!q.prompt) e.push(w + 'prompt missing.');
+    if (!Array.isArray(q.parts) || !q.parts.length) e.push(w + 'needs at least one part.');
+    if (q.hints && !Array.isArray(q.hints)) e.push(w + 'hints must be a list.');
+    if (q.solution && !Array.isArray(q.solution)) e.push(w + 'solution must be a list of steps.');
+    if (q.image && (typeof q.image !== 'object' || !q.image.key)) e.push(w + 'image needs a key (upload the picture first).');
+    if (q.search && typeof q.search !== 'string') e.push(w + 'search must be text.');
+    (q.parts || []).forEach(function (p) {
+      if (TYPES.indexOf(p.type) < 0) e.push(w + 'unknown part type ' + p.type);
+      if (p.type !== 'written' && p.type !== 'solutions' && p.type !== 'graph' && (p.answer === undefined || p.answer === '')) e.push(w + 'part ' + p.id + ' needs an answer.');
+      if (p.type === 'choice' && (!Array.isArray(p.options) || p.options.indexOf(p.answer) < 0)) e.push(w + 'choice answer must be one of the options.');
+      if (p.type === 'graph' && !p.grid) e.push(w + 'graph part needs a grid.');
+      if (p.type === 'graph' && p.mode === 'line' && !p.line) e.push(w + 'line graph needs a line equation.');
+      if (p.type === 'graph' && p.mode === 'points' && !Array.isArray(p.answer)) e.push(w + 'points graph needs a list of answer points.');
+      if (p.type === 'solutions' && !p.equation) e.push(w + 'solutions part needs an equation.');
+    });
+  });
+  return e;
+}
+
+function t_deleteAssignment(aid) {
+  requireTeacher_();
+  var row = assignmentRow_(aid);
+  if (row) Db.remove('Assignments', row._row);
+  return t_overview();
+}
+
+/** Builds the Skyward import file (Last Name, First Name, ID, Score) and writes it to the Skyward Export tab. */
+function t_skyward(aid, scoreMode) {
+  requireTeacher_();
+  var cfg = settings_();
+  var mode = scoreMode || cfg.skywardScore;
+  var roster = Db.read('Roster');
+  var subs = Db.read('Submissions').filter(function (s) { return s.Assignment === aid; });
+  var rows = roster.map(function (st) {
+    var sub = subs.filter(function (s) { return String(s.Email).toLowerCase() === String(st.Email).toLowerCase(); }).pop();
+    var score = '';
+    if (sub) {
+      score = mode === 'points' ? round2_(+sub['Auto Points'] + (+sub['Written Points'] || 0)) : Math.round(+sub['Final Percent'] * 10) / 10;
+    }
+    return { 'Last Name': st['Last Name'], 'First Name': st['First Name'], ID: st['Student ID'], Score: score };
+  }).sort(function (x, y) { return String(x['Last Name']).localeCompare(String(y['Last Name'])); });
+  Db.replaceAll('Skyward Export', rows);
+  var csv = ['Last Name,First Name,ID,Score'].concat(rows.map(function (r) {
+    return [r['Last Name'], r['First Name'], r.ID, r.Score].map(function (v) { v = String(v); return /[",]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }).join(',');
+  })).join('\r\n');
+  var pending = subs.filter(function (s) { return +s['Written Max'] > 0 && s['Written Points'] === ''; }).length;
+  return { csv: csv, filename: aid + '_skyward.csv', count: rows.filter(function (r) { return r.Score !== ''; }).length, pendingWritten: pending };
+}
+
+</script>
+<script>
+/**
+ * engine.js
+ * Runs Algebra Coach entirely in the student's browser.
+ * - Decrypts the content bundle (problems, answers, hints, solutions, pictures).
+ * - Replaces the Google Sheet with tables kept in this browser's localStorage.
+ * - Lets the unchanged Code.gs student functions run here, behind a google.script.run look-alike.
+ * - Builds the sealed receipt the student sends to the teacher.
+ */
+(function () {
+  var LS = window.localStorage, PREFIX = 'acs_';
+  function lsGet(k, d) { try { var v = LS.getItem(PREFIX + k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
+  function lsSet(k, v) { try { LS.setItem(PREFIX + k, JSON.stringify(v)); } catch (e) { console.error('storage full', e); } }
+
+  function b64ToBytes(b64) { var s = atob(b64), u = new Uint8Array(s.length); for (var i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; }
+  function bytesToB64url(u) { var s = ''; for (var i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+  async function streamBytes(bytes, stream) { return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer()); }
+
+  // ----- profile and device -----
+  var DEVICE = lsGet('device', null);
+  if (!DEVICE) { DEVICE = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)).replace(/-/g, '').slice(0, 12); lsSet('device', DEVICE); }
+  var STUDENT_EMAIL = 'student@this-device';
+
+  // ----- content -----
+  var CONTENT = null;
+  window.AC_READY = (async function () {
+    var k = window.AC_K.map(function (p, i) { return i % 2 ? p.split('').reverse().join('') : p; }).join('');
+    var key = await crypto.subtle.importKey('raw', b64ToBytes(k), 'AES-GCM', false, ['decrypt']);
+    var raw = b64ToBytes(window.AC_CONTENT);
+    var plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.subarray(0, 12) }, key, raw.subarray(12)));
+    var json = new TextDecoder().decode(await streamBytes(plain, new DecompressionStream('gzip')));
+    CONTENT = JSON.parse(json);
+    window.BUILTIN_IMAGES = CONTENT.images || {};
+    return true;
+  })();
+
+  // ----- the local "spreadsheet" -----
+  function configRow(a) {
+    var c = (window.AC_CONFIG.assignments || {})[a.id] || {};
+    var full = JSON.parse(JSON.stringify(a));
+    if (c.resources) full.resources = c.resources;
+    return { ID: a.id, Section: a.section, Title: a.title, Status: c.status || 'closed', Mode: c.mode || 'practice',
+      Calculator: c.calculator || a.calculator || 'basic', 'Checks Per Part': c.checks || '', 'Lock After Leaves': c.lockAfter || '', Due: c.due || '',
+      JSON: JSON.stringify(full) };
+  }
+  function table(name) {
+    if (name === 'Assignments') return (CONTENT ? CONTENT.assignments : []).map(configRow).filter(function (r) { return r.Status === 'open'; });
+    if (name === 'Settings') {
+      var s = Object.assign({}, window.AC_CONFIG.settings || {});
+      return SETTING_DEFAULTS.map(function (d) { return { Key: d[0], Value: s[d[0]] !== undefined ? String(s[d[0]]) : d[1] }; });
+    }
+    if (name === 'Teachers') return [];
+    if (name === 'Roster') {
+      var p = lsGet('profile', null);
+      return p ? [{ Email: STUDENT_EMAIL, 'Last Name': '', 'First Name': p.name, 'Student ID': '', Period: p.period }] : [];
+    }
+    return lsGet('t_' + name, []);
+  }
+  var WRITABLE = { Attempts: 1, Submissions: 1, Events: 1 };
+  window.Db = {
+    read: function (name) { return table(name).map(function (r, i) { return Object.assign({ _row: i + 2 }, r); }); },
+    append: function (name, obj) {
+      if (!WRITABLE[name]) return 0;
+      var t = table(name), row = {}; (SHEETS[name] || Object.keys(obj)).forEach(function (h) { row[h] = obj[h] === undefined ? '' : (obj[h] instanceof Date ? obj[h].toISOString() : obj[h]); });
+      if (name === 'Events' && t.length > 300) t = t.slice(-250);
+      t.push(row); lsSet('t_' + name, t); return t.length + 1;
+    },
+    update: function (name, rowNum, obj) {
+      if (!WRITABLE[name]) return;
+      var t = table(name), r = t[rowNum - 2]; if (!r) return;
+      Object.keys(obj).forEach(function (k) { if (obj[k] !== undefined) r[k] = obj[k] instanceof Date ? obj[k].toISOString() : obj[k]; });
+      lsSet('t_' + name, t);
+    },
+    findRow: function (name, col, value) {
+      var t = table(name);
+      for (var i = 0; i < t.length; i++) if (String(t[i][col]) === String(value)) return Object.assign({ _row: i + 2 }, t[i]);
+      return null;
+    },
+    remove: function (name, rowNum) { var t = table(name); t.splice(rowNum - 2, 1); lsSet('t_' + name, t); },
+    replaceAll: function () {},
+    withLock: function (fn) { return fn(); },
+    ensureAll: function () {}
+  };
+  window.Auth = { activeEmail: function () { return STUDENT_EMAIL; }, ownerEmail: function () { return 'teacher@not-this-device'; } };
+  window.CacheService = { getScriptCache: function () { return { get: function () { return null; }, put: function () {} }; } };
+  window.Utilities = { getUuid: function () { return crypto.randomUUID(); } };
+
+  // ----- extra student functions for the static site -----
+  window.api_profile = function () { return lsGet('profile', null); };
+  window.api_setProfile = function (name, period) {
+    name = String(name || '').trim().slice(0, 60); period = String(period || '').trim().slice(0, 20);
+    if (!name) throw new Error('Type your first and last name.');
+    lsSet('profile', { name: name, period: period }); return true;
+  };
+  var origBootstrap = window.api_bootstrap;
+  window.api_bootstrap = function () {
+    if (!lsGet('profile', null)) return { role: 'none', needProfile: true };
+    var b = origBootstrap(); b.role = 'student'; return b;
+  };
+
+  async function sha256hex(s) { var d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)); return Array.from(new Uint8Array(d)).map(function (x) { return x.toString(16).padStart(2, '0'); }).join(''); }
+  var B32 = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  function toCode(hex, n) { var out = ''; for (var i = 0; i < n; i++) out += B32[parseInt(hex.substr(i * 2, 2), 16) % 32]; return out; }
+  /** The lock code the student reads to the teacher. Changes with every lockout. */
+  window.api_lockInfo = async function (aid) {
+    var att = getAttempt_(STUDENT_EMAIL, aid); if (!att) return null;
+    return { code: toCode(await sha256hex(DEVICE + '|' + aid + '|' + (att.state.integrity.lockouts || 0)), 6) };
+  };
+  window.api_unlock = async function (aid, code) {
+    var info = await window.api_lockInfo(aid); if (!info) throw new Error('Nothing to unlock.');
+    var key = await crypto.subtle.importKey('raw', b64ToBytes(CONTENT.unlockSecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    var sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(aid + '|' + info.code)));
+    var expect = toCode(Array.from(sig).map(function (x) { return x.toString(16).padStart(2, '0'); }).join(''), 6);
+    if (String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '') !== expect) return { ok: false };
+    var att = getAttempt_(STUDENT_EMAIL, aid);
+    att.state.integrity.leaves = 0; att.state.integrity.opens = 0; att.state.integrity.unlocks = (att.state.integrity.unlocks || 0) + 1;
+    putAttempt_(STUDENT_EMAIL, aid, 'active', att.state, att.row);
+    logEvent_(STUDENT_EMAIL, aid, 'unlocked', 'teacher code');
+    return { ok: true };
+  };
+
+  /** Sealed receipt: compressed, encrypted to the teacher's public key, split into Form-sized parts. */
+  window.api_receipt = async function (aid) {
+    var att = getAttempt_(STUDENT_EMAIL, aid), prof = lsGet('profile', {}) || {};
+    if (!att) throw new Error('Nothing to send yet.');
+    var sub = Db.read('Submissions').filter(function (s) { return s.Assignment === aid; }).pop();
+    var events = Db.read('Events').filter(function (e) { return e.Assignment === aid; }).slice(-40).map(function (e) { return [String(e.Time).slice(5, 16), e.Type, String(e.Detail).slice(0, 40)]; });
+    var st = att.state, rid = (await sha256hex(DEVICE + aid + (sub ? sub.Submitted : '') + st.started)).slice(0, 8);
+    var payload = { v: 1, rid: rid, a: aid, n: prof.name || '', p: prof.period || '', dev: DEVICE, t0: st.started, t1: sub ? sub.Submitted : new Date().toISOString(),
+      status: att.status, ans: st.answers, h: st.hints, c: st.checks, r: Object.keys(st.revealed || {}), I: st.integrity, ev: events };
+    var MAXP = 3, LIM = 3900, parts;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (attempt === 1) payload.ev = payload.ev.slice(-10);
+      if (attempt === 2) { Object.keys(payload.ans).forEach(function (k) { if (/\.__work$/.test(k)) delete payload.ans[k]; }); payload.workDropped = true; }
+      var sealed = await seal(JSON.stringify(payload));
+      parts = [];
+      var size = Math.ceil(sealed.length / Math.ceil(sealed.length / (LIM - 20)));
+      for (var i = 0; i < sealed.length; i += size) parts.push(sealed.slice(i, i + size));
+      if (parts.length <= MAXP) break;
+    }
+    var n = parts.length;
+    parts = parts.map(function (p, i) { return 'AC1.' + rid + '.' + (i + 1) + 'of' + n + '.' + p; });
+    return { parts: parts, rid: rid, name: prof.name || '', period: prof.period || '', formUrl: window.AC_CONFIG.formUrl || '', tooLong: parts.length > MAXP };
+  };
+  async function seal(text) {
+    var gz = await streamBytes(new TextEncoder().encode(text), new CompressionStream('gzip'));
+    var pub = await crypto.subtle.importKey('jwk', window.AC_CONFIG.teacherKey, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+    var eph = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey']);
+    var aes = await crypto.subtle.deriveKey({ name: 'ECDH', public: pub }, eph.privateKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+    var iv = crypto.getRandomValues(new Uint8Array(12));
+    var ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, aes, gz));
+    var epk = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
+    var all = new Uint8Array(epk.length + iv.length + ct.length);
+    all.set(epk, 0); all.set(iv, epk.length); all.set(ct, epk.length + iv.length);
+    return bytesToB64url(all);
+  }
+
+  // ----- google.script.run look-alike -----
+  function runner(ok, fail) {
+    return new Proxy({}, {
+      get: function (t, name) {
+        if (name === 'withSuccessHandler') return function (h) { return runner(h, fail); };
+        if (name === 'withFailureHandler') return function (h) { return runner(ok, h); };
+        return function () {
+          var args = Array.prototype.slice.call(arguments);
+          window.AC_READY.then(function () {
+            var fn = window[name];
+            if (typeof fn !== 'function') throw new Error('Unknown function ' + String(name));
+            return fn.apply(null, JSON.parse(JSON.stringify(args)));
+          }).then(function (r) { if (ok) ok(r === undefined ? null : JSON.parse(JSON.stringify(r))); })
+            .catch(function (e) { console.error(e); if (fail) fail(e instanceof Error ? e : new Error(String(e))); });
+        };
+      }
+    });
+  }
+  window.google = { script: { run: runner(null, null) } };
+})();
+
+</script>
+
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>Algebra Coach</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --navy:#1E2761; --ice:#CADCFC; --amber:#E8A33D; --paper:#F7F8FC; --ink:#222; --muted:#5b6478; --line:#d9deea;
+          --good:#2f855a; --bad:#c05621; --goodbg:#e8f5ee; --badbg:#fdf0e6; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; background:var(--paper); color:var(--ink); font-family: Calibri, Carlito, "Segoe UI", Roboto, Arial, sans-serif; font-size:17px; line-height:1.4; }
+  h1,h2,h3 { font-family: Cambria, Caladea, Georgia, serif; color:var(--navy); margin:0; }
+  button { font: inherit; cursor:pointer; border-radius:10px; border:1px solid var(--line); background:#fff; padding:8px 14px; min-height:42px; color:var(--ink); }
+  button:disabled { opacity:.5; cursor:default; }
+  button.primary { background:var(--navy); color:#fff; border-color:var(--navy); }
+  button.amber { background:var(--amber); border-color:var(--amber); color:#1b1b1b; font-weight:600; }
+  button.ghost { background:transparent; border-color:transparent; color:var(--navy); }
+  button.small { min-height:34px; padding:4px 10px; font-size:15px; }
+  input[type=text], textarea, select { font: inherit; width:100%; padding:10px 12px; border:1.5px solid var(--line); border-radius:10px; background:#fff; }
+  input[type=text]:focus, textarea:focus { outline:none; border-color:var(--navy); box-shadow:0 0 0 3px var(--ice); }
+  .bar { position:sticky; top:0; z-index:20; background:var(--navy); color:#fff; padding:8px 14px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .bar h1 { color:#fff; font-size:19px; flex:1; min-width:160px; }
+  .bar button { background:rgba(255,255,255,.1); color:#fff; border-color:rgba(255,255,255,.25); min-height:38px; padding:6px 12px; }
+  .bar button.on { background:var(--amber); color:#1b1b1b; border-color:var(--amber); }
+  .wrap { max-width:860px; margin:0 auto; padding:14px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:14px; margin:12px 0; }
+  .muted { color:var(--muted); font-size:15px; }
+  .tag { display:inline-block; font-size:12.5px; font-weight:700; letter-spacing:.03em; padding:2px 8px; border-radius:999px; background:var(--ice); color:var(--navy); }
+  .tag.amber { background:#fbe7c6; color:#7a4b00; }
+  .tag.test { background:#ffe1e1; color:#8b1d1d; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .grow { flex:1; }
+  .noselect { -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+  table.data { border-collapse:collapse; margin:8px 0; font-size:15px; display:block; overflow-x:auto; }
+  table.data td { border:1px solid var(--line); padding:4px 9px; text-align:center; white-space:nowrap; }
+  table.data td:first-child { background:var(--paper); font-weight:600; text-align:left; }
+  .graph { width:100%; max-width:420px; touch-action:none; display:block; margin:6px 0; }
+  .toast { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); background:var(--navy); color:#fff; padding:10px 16px; border-radius:10px; z-index:99; max-width:92vw; display:none; }
+  .modal-bg { position:fixed; inset:0; background:rgba(15,20,45,.55); z-index:80; display:none; align-items:center; justify-content:center; padding:14px; }
+  .modal { background:#fff; border-radius:16px; padding:18px; max-width:560px; width:100%; max-height:92vh; overflow:auto; }
+  @media (max-width:600px) { html,body { font-size:16px; } .wrap { padding:8px; } .card { padding:11px; border-radius:12px; } .bar h1 { font-size:17px; } }
+</style>
+<script>
+/* ---------- Shared: math parser for the calculator and graphing ---------- */
+var AMath = (function () {
+  var FN = { sqrt: Math.sqrt, abs: Math.abs, sin: Math.sin, cos: Math.cos, tan: Math.tan, log: function (x) { return Math.log(x) / Math.LN10; }, ln: Math.log };
+  function norm(s) {
+    return String(s).replace(/[−–—]/g, '-').replace(/×|·/g, '*').replace(/÷/g, '/').replace(/√/g, 'sqrt').replace(/π/g, 'pi').replace(/²/g, '^2');
+  }
+  function tokenize(s) {
+    var t = [], i = 0;
+    while (i < s.length) {
+      var c = s[i];
+      if (/\s/.test(c)) { i++; continue; }
+      if (/[0-9.]/.test(c)) { var j = i; while (j < s.length && /[0-9.]/.test(s[j])) j++; t.push({ k: 'n', v: parseFloat(s.slice(i, j)) }); i = j; continue; }
+      if (/[a-z]/i.test(c)) {
+        var w = s.slice(i).match(/^[a-z]+/i)[0].toLowerCase(), found = false;
+        for (var name in FN) if (w.indexOf(name) === 0) { t.push({ k: 'f', v: name }); i += name.length; found = true; break; }
+        if (found) continue;
+        if (w.indexOf('pi') === 0) { t.push({ k: 'n', v: Math.PI }); i += 2; continue; }
+        t.push({ k: 'v', v: c.toLowerCase() }); i++; continue;
+      }
+      if ('+-*/()^,'.indexOf(c) >= 0) { t.push({ k: c }); i++; continue; }
+      throw new Error('Unexpected "' + c + '"');
+    }
+    return t;
+  }
+  function compile(str) {
+    var t = tokenize(norm(str)), p = 0;
+    function pk() { return t[p]; }
+    function expr() { var n = term(); while (pk() && (pk().k === '+' || pk().k === '-')) { var op = t[p++].k, r = term(); n = op === '+' ? add(n, r) : sub(n, r); } return n; }
+    function add(a, b) { return function (e) { return a(e) + b(e); }; }
+    function sub(a, b) { return function (e) { return a(e) - b(e); }; }
+    function term() {
+      var n = unary();
+      for (;;) {
+        var k = pk();
+        if (k && (k.k === '*' || k.k === '/')) { p++; var r = unary(); n = k.k === '*' ? mul(n, r) : dvd(n, r); continue; }
+        if (k && (k.k === 'n' || k.k === 'v' || k.k === '(' || k.k === 'f')) { n = mul(n, power()); continue; }
+        return n;
+      }
+    }
+    function mul(a, b) { return function (e) { return a(e) * b(e); }; }
+    function dvd(a, b) { return function (e) { return a(e) / b(e); }; }
+    function unary() { var k = pk(); if (k && k.k === '-') { p++; var u = unary(); return function (e) { return -u(e); }; } if (k && k.k === '+') { p++; return unary(); } return power(); }
+    function power() { var b = atom(); if (pk() && pk().k === '^') { p++; var ex = unary(); return function (e) { return Math.pow(b(e), ex(e)); }; } return b; }
+    function atom() {
+      var k = t[p++];
+      if (!k) throw new Error('Incomplete expression');
+      if (k.k === 'n') return function () { return k.v; };
+      if (k.k === 'v') return function (e) { if (!(k.v in e)) throw new Error('Unknown variable ' + k.v); return e[k.v]; };
+      if (k.k === 'f') { var arg = atom(); var f = FN[k.v]; return function (e) { return f(arg(e)); }; }
+      if (k.k === '(') { var n = expr(); if (!t[p] || t[p].k !== ')') throw new Error('Missing )'); p++; return n; }
+      throw new Error('Unexpected symbol');
+    }
+    var fn = expr();
+    if (p !== t.length) throw new Error('Check the end of your expression');
+    return fn;
+  }
+  function fmt(x) {
+    if (!isFinite(x)) return 'undefined';
+    var r = Math.round(x * 1e9) / 1e9;
+    return String(r);
+  }
+  /** Fraction approximation for display, e.g. 0.333333 -> 1/3 */
+  function frac(x) {
+    if (!isFinite(x) || Math.abs(x - Math.round(x)) < 1e-9) return null;
+    for (var d = 2; d <= 64; d++) { var n = Math.round(x * d); if (Math.abs(n / d - x) < 1e-9) return n + '/' + d; }
+    return null;
+  }
+  return { compile: compile, fmt: fmt, frac: frac };
+})();
+
+/* ---------- Shared: SVG coordinate grids ---------- */
+var AGraph = (function () {
+  var NS = 'http://www.w3.org/2000/svg', W = 400, H = 400, PADL = 42, PADB = 34, PADT = 12, PADR = 12;
+  function el(name, attrs, parent) { var e = document.createElementNS(NS, name); for (var k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; }
+  function r6(x) { return Math.round(x * 1e6) / 1e6; }
+  function labelStep(range, step, every) {
+    if (every) return every;
+    var n = Math.round(range / step); var k = 1;
+    while (n / k > 12) k = k === 1 ? 2 : (k === 2 ? 5 : k * 2);
+    return k;
+  }
+  function create(container, grid) {
+    var g = grid, svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, 'class': 'graph noselect', role: 'img' });
+    container.appendChild(svg);
+    var pw = W - PADL - PADR, ph = H - PADT - PADB;
+    function X(x) { return PADL + (x - g.xmin) / (g.xmax - g.xmin) * pw; }
+    function Y(y) { return PADT + (g.ymax - y) / (g.ymax - g.ymin) * ph; }
+    function inv(px, py) { return [g.xmin + (px - PADL) / pw * (g.xmax - g.xmin), g.ymax - (py - PADT) / ph * (g.ymax - g.ymin)]; }
+    el('rect', { x: PADL, y: PADT, width: pw, height: ph, fill: '#fff', stroke: '#c9cfdc' }, svg);
+    var lx = labelStep(g.xmax - g.xmin, g.xstep, g.labelEveryX), ly = labelStep(g.ymax - g.ymin, g.ystep, g.labelEveryY);
+    var ix = 0;
+    for (var x = g.xmin; x <= g.xmax + 1e-9; x = r6(x + g.xstep), ix++) {
+      el('line', { x1: X(x), x2: X(x), y1: PADT, y2: PADT + ph, stroke: ix % lx === 0 ? '#c3cbe0' : '#e6e9f1', 'stroke-width': 1 }, svg);
+      if (ix % lx === 0) { var tx = el('text', { x: X(x), y: H - PADB + 16, 'text-anchor': 'middle', 'font-size': 12, fill: '#5b6478' }, svg); tx.textContent = r6(x); }
+    }
+    var iy = 0;
+    for (var y = g.ymin; y <= g.ymax + 1e-9; y = r6(y + g.ystep), iy++) {
+      el('line', { y1: Y(y), y2: Y(y), x1: PADL, x2: PADL + pw, stroke: iy % ly === 0 ? '#c3cbe0' : '#e6e9f1', 'stroke-width': 1 }, svg);
+      if (iy % ly === 0) { var ty = el('text', { x: PADL - 5, y: Y(y) + 4, 'text-anchor': 'end', 'font-size': 12, fill: '#5b6478' }, svg); ty.textContent = r6(y); }
+    }
+    if (g.xmin <= 0 && g.xmax >= 0) el('line', { x1: X(0), x2: X(0), y1: PADT, y2: PADT + ph, stroke: '#1E2761', 'stroke-width': 1.6 }, svg);
+    if (g.ymin <= 0 && g.ymax >= 0) el('line', { y1: Y(0), y2: Y(0), x1: PADL, x2: PADL + pw, stroke: '#1E2761', 'stroke-width': 1.6 }, svg);
+    if (g.xlabel) { var xl = el('text', { x: PADL + pw / 2, y: H - 3, 'text-anchor': 'middle', 'font-size': 12.5, fill: '#1E2761', 'font-weight': 700 }, svg); xl.textContent = g.xlabel; }
+    if (g.ylabel) { var yl = el('text', { x: 11, y: PADT + ph / 2, 'text-anchor': 'middle', 'font-size': 12.5, fill: '#1E2761', 'font-weight': 700, transform: 'rotate(-90 11 ' + (PADT + ph / 2) + ')' }, svg); yl.textContent = g.ylabel; }
+    var layer = el('g', {}, svg);
+    return { svg: svg, X: X, Y: Y, inv: inv, layer: layer, grid: g, el: el, box: { x0: PADL, y0: PADT, x1: PADL + pw, y1: PADT + ph } };
+  }
+  /** Draw a full line through two points, clipped to the grid. */
+  function lineThrough(G, p1, p2, color, width, parent) {
+    var g = G.grid, dx = p2[0] - p1[0], dy = p2[1] - p1[1], a, b;
+    if (Math.abs(dx) < 1e-12) { a = [p1[0], g.ymin]; b = [p1[0], g.ymax]; }
+    else {
+      var m = dy / dx, pts = [];
+      [g.xmin, g.xmax].forEach(function (x) { var y = p1[1] + m * (x - p1[0]); if (y >= g.ymin - 1e-9 && y <= g.ymax + 1e-9) pts.push([x, y]); });
+      if (Math.abs(m) > 1e-12) [g.ymin, g.ymax].forEach(function (y) { var x = p1[0] + (y - p1[1]) / m; if (x >= g.xmin - 1e-9 && x <= g.xmax + 1e-9) pts.push([x, y]); });
+      pts.sort(function (u, v) { return u[0] - v[0]; });
+      if (pts.length < 2) return;
+      a = pts[0]; b = pts[pts.length - 1];
+    }
+    el('line', { x1: G.X(a[0]), y1: G.Y(a[1]), x2: G.X(b[0]), y2: G.Y(b[1]), stroke: color, 'stroke-width': width || 2.5, 'stroke-linecap': 'round' }, parent || G.layer);
+  }
+  function figure(container, fig) {
+    var G = create(container, fig.grid);
+    (fig.lines || []).forEach(function (L) {
+      lineThrough(G, L.through[0], L.through[1], L.color || '#1E2761', 2.5);
+      if (L.label) {
+        var p = L.through[1], t = el('text', { x: Math.min(G.X(p[0]) + 6, 360), y: Math.max(G.Y(p[1]) - 6, 24), 'font-size': 13, 'font-weight': 700, fill: L.color || '#1E2761' }, G.layer);
+        t.textContent = L.label;
+      }
+    });
+    (fig.polylines || []).forEach(function (L) {
+      var d = L.points.map(function (p, i) { return (i ? 'L' : 'M') + G.X(p[0]) + ' ' + G.Y(p[1]); }).join(' ');
+      el('path', { d: d, fill: 'none', stroke: L.color || '#1E2761', 'stroke-width': 3, 'stroke-linejoin': 'round' }, G.layer);
+    });
+    (fig.points || []).forEach(function (P) {
+      el('circle', { cx: G.X(P.x), cy: G.Y(P.y), r: 4.5, fill: '#E8A33D', stroke: '#1E2761', 'stroke-width': 1.2 }, G.layer);
+      if (P.label) {
+        var right = G.X(P.x) > 300, t = el('text', { x: G.X(P.x) + (right ? -7 : 7), y: G.Y(P.y) + (G.Y(P.y) < 30 ? 18 : -7), 'font-size': P.label.length > 3 ? 12 : 14, 'font-weight': 700, fill: '#1E2761', 'text-anchor': right ? 'end' : 'start', 'paint-order': 'stroke', stroke: '#fff', 'stroke-width': 3 }, G.layer);
+        t.textContent = P.label;
+      }
+    });
+    return G;
+  }
+  /** Interactive plotting. part: {mode, grid, extent}. state: {points:[]}. onChange(state). */
+  function plotter(container, part, state, onChange, readOnly) {
+    var G = create(container, part.grid), g = part.grid, pts = (state && state.points) ? state.points.slice() : [], sel = pts.length - 1;
+    var drawn = G.el('g', {}, G.svg);
+    function snap(v, min, step) { return r6(Math.round((v - min) / step) * step + min); }
+    function draw() {
+      while (drawn.firstChild) drawn.removeChild(drawn.firstChild);
+      if (part.mode === 'line' && pts.length >= 2) {
+        var sorted = pts.slice().sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+        var first = sorted[0], last = sorted[sorted.length - 1];
+        if (part.extent === 'restricted') {
+          G.el('line', { x1: G.X(first[0]), y1: G.Y(first[1]), x2: G.X(last[0]), y2: G.Y(last[1]), stroke: '#2b6cb0', 'stroke-width': 3, 'stroke-linecap': 'round' }, drawn);
+        } else lineThrough(G, first, last, '#2b6cb0', 3, drawn);
+      }
+      pts.forEach(function (p, i) {
+        G.el('circle', { cx: G.X(p[0]), cy: G.Y(p[1]), r: i === sel ? 7 : 5.5, fill: i === sel ? '#E8A33D' : '#1E2761', stroke: '#fff', 'stroke-width': 1.5 }, drawn);
+      });
+      if (readout) readout.textContent = pts.length ? (sel >= 0 && pts[sel] ? 'Selected point: (' + pts[sel][0] + ', ' + pts[sel][1] + ')' : '') + '   Points: ' + pts.length : 'Tap the grid to plot a point. Tap a point again to remove it.';
+    }
+    function emit() { draw(); onChange && onChange({ points: pts.slice() }); }
+    var readout = null, tools = null;
+    if (!readOnly) {
+      G.svg.addEventListener('pointerdown', function (ev) {
+        ev.preventDefault();
+        var r = G.svg.getBoundingClientRect(), px = (ev.clientX - r.left) / r.width * 400, py = (ev.clientY - r.top) / r.height * 400;
+        if (px < G.box.x0 - 8 || px > G.box.x1 + 8 || py < G.box.y0 - 8 || py > G.box.y1 + 8) return;
+        var d = G.inv(px, py), x = snap(d[0], g.xmin, g.xstep), y = snap(d[1], g.ymin, g.ystep);
+        x = Math.max(g.xmin, Math.min(g.xmax, x)); y = Math.max(g.ymin, Math.min(g.ymax, y));
+        var hit = pts.findIndex(function (p) { return Math.abs(p[0] - x) < 1e-9 && Math.abs(p[1] - y) < 1e-9; });
+        if (hit >= 0) { pts.splice(hit, 1); sel = pts.length - 1; } else { pts.push([x, y]); sel = pts.length - 1; }
+        emit();
+      });
+      tools = document.createElement('div'); tools.className = 'row'; tools.style.margin = '2px 0 6px';
+      readout = document.createElement('div'); readout.className = 'muted'; readout.style.width = '100%';
+      function nudge(dx, dy) { if (sel < 0 || !pts[sel]) return; var p = pts[sel]; p[0] = Math.max(g.xmin, Math.min(g.xmax, r6(p[0] + dx * g.xstep))); p[1] = Math.max(g.ymin, Math.min(g.ymax, r6(p[1] + dy * g.ystep))); emit(); }
+      [['←', -1, 0], ['→', 1, 0], ['↑', 0, 1], ['↓', 0, -1]].forEach(function (b) {
+        var bt = document.createElement('button'); bt.type = 'button'; bt.className = 'small'; bt.textContent = b[0]; bt.title = 'Move selected point';
+        bt.onclick = function () { nudge(b[1], b[2]); }; tools.appendChild(bt);
+      });
+      var undo = document.createElement('button'); undo.type = 'button'; undo.className = 'small'; undo.textContent = 'Undo';
+      undo.onclick = function () { pts.pop(); sel = pts.length - 1; emit(); };
+      var clr = document.createElement('button'); clr.type = 'button'; clr.className = 'small'; clr.textContent = 'Clear';
+      clr.onclick = function () { pts = []; sel = -1; emit(); };
+      tools.appendChild(undo); tools.appendChild(clr); tools.appendChild(readout);
+      container.appendChild(tools);
+    }
+    draw();
+    return { set: function (s) { pts = (s && s.points) ? s.points.slice() : []; sel = pts.length - 1; draw(); }, disable: function () { G.svg.style.pointerEvents = 'none'; if (tools) tools.style.display = 'none'; } };
+  }
+  return { create: create, figure: figure, plotter: plotter, lineThrough: lineThrough };
+})();
+
+/* ---------- Shared: step checker for on-screen work, and step-change highlighting ---------- */
+var AStep = (function () {
+  var FUNCS = ['sqrt', 'abs', 'sin', 'cos', 'tan', 'log', 'ln', 'pi'];
+  function norm(s) {
+    return String(s || '')
+      .replace(/[−–—]/g, '-').replace(/×|·/g, '*').replace(/÷/g, '/').replace(/ℓ/g, 'l')
+      .replace(/½/g, '(1/2)').replace(/⅓/g, '(1/3)').replace(/⅔/g, '(2/3)').replace(/¼/g, '(1/4)').replace(/¾/g, '(3/4)')
+      .replace(/\$/g, '').replace(/(\d),(?=\d{3}\b)/g, '$1')
+      .replace(/(^|[^\d.\/])(\d+)\s+(\d+)\s*\/\s*(\d+)/g, '$1($2+$3/$4)').trim();
+  }
+  function varsIn(s) {
+    var out = {}, words = s.match(/[a-z]+/gi) || [];
+    words.forEach(function (w) {
+      w = w.toLowerCase();
+      for (var i = 0; i < FUNCS.length; i++) if (w.indexOf(FUNCS[i]) === 0) { w = w.slice(FUNCS[i].length); i = -1; if (!w) break; }
+      w.split('').forEach(function (c) { out[c] = 1; });
+    });
+    return Object.keys(out).sort();
+  }
+  function num(expr) { try { var v = AMath.compile(expr)({}); return isFinite(v) ? v : null; } catch (e) { return null; } }
+  function near(a, b) { return Math.abs(a - b) <= 1e-6 * (1 + Math.abs(a) + Math.abs(b)); }
+
+  /** Turn one written piece into something comparable, or null if it cannot be read. */
+  function classify(raw) {
+    var s = norm(raw);
+    if (!s || /≟|\?=|≠|!=/.test(s)) return null;
+    s = s.replace(/^(answer|step \d+|[a-z]\.)\s*[:.]?\s+/i, '').replace(/^[a-z][a-z\- ]{1,20}:\s*/i, '');
+    s = s.replace(/(\d)\s*(miles?|mi|hours?|hr|h|feet|ft|meters?|km|lb|pounds?|inches?|yards?|yd|dollars?|seconds?|sec|days?|weeks?|bags|tablespoons|degrees?|°\s*[cf]?)\.?$/i, '$1');
+    var cont = /^=/.test(s); if (cont) s = s.slice(1);
+    var segs = s.split('=').map(function (x) { return x.trim(); });
+    if (segs.some(function (x) { return !x; })) return null;
+    // Drop a leading function-evaluation label like p(-2) or h(7)
+    if (segs.length > 1 && /^[a-z]\s*\([^a-z()]*\)$/i.test(segs[0])) segs.shift();
+    var vs = varsIn(segs.join(' '));
+    if (!vs.length) {
+      var vals = segs.map(num); if (vals.some(function (v) { return v === null; })) return null;
+      var ok = vals.every(function (v) { return near(v, vals[0]); });
+      return { kind: segs.length > 1 && !cont ? 'claim' : 'num', value: vals[vals.length - 1], first: vals[0], ok: ok, chain: segs.length > 1 };
+    }
+    // Assignment: m = (numbers) = (numbers)
+    if (segs.length >= 2 && /^[a-z]$/i.test(segs[0]) && varsIn(segs.slice(1).join(' ')).length === 0) {
+      var av = segs.slice(1).map(num); if (av.some(function (v) { return v === null; })) return null;
+      return { kind: 'num', name: segs[0].toLowerCase(), value: av[av.length - 1], first: av[0], ok: av.every(function (v) { return near(v, av[0]); }), chain: av.length > 1 };
+    }
+    if (segs.length !== 2) return null;
+    var L, R;
+    try { L = AMath.compile(segs[0]); R = AMath.compile(segs[1]); } catch (e) { return null; }
+    function f(env) { return L(env) - R(env); }
+    var zero = {}; vs.forEach(function (v) { zero[v] = 0; });
+    try {
+      var c0 = f(zero), coef = {};
+      vs.forEach(function (v) { var e = Object.assign({}, zero); e[v] = 1; coef[v] = f(e) - c0; });
+      var env = {}, pred = c0; vs.forEach(function (v, i) { env[v] = 1.7 + i * 0.9; pred += coef[v] * env[v]; });
+      if (!isFinite(c0) || !near(f(env), pred)) return null;
+    } catch (e) { return null; }
+    if (vs.length === 1) {
+      var c1 = coef[vs[0]];
+      if (Math.abs(c1) < 1e-12) return null;
+      return { kind: 'eq1', v: vs[0], root: -c0 / c1 };
+    }
+    return { kind: 'eq2', vars: vs.join(','), vec: vs.map(function (v) { return coef[v]; }).concat([c0]) };
+  }
+  function proportional(a, b) {
+    var r = null;
+    for (var i = 0; i < a.length; i++) {
+      var x = a[i], y = b[i];
+      if (Math.abs(x) < 1e-12 && Math.abs(y) < 1e-12) continue;
+      if (Math.abs(x) < 1e-12 || Math.abs(y) < 1e-12) return false;
+      if (r === null) r = x / y; else if (!near(x / y, r)) return false;
+    }
+    return true;
+  }
+  function follows(prev, cur) {
+    if (!prev || !cur) return null;
+    if (cur.kind === 'num' && prev.kind === 'num' && (!cur.name || !prev.name || cur.name === prev.name)) return near(cur.first, prev.value);
+    if (cur.kind === 'eq1' && prev.kind === 'eq1' && cur.v === prev.v) return near(cur.root, prev.root);
+    // "x = 3" after an equation in x, or an equation in x after "x = 3"
+    if (cur.kind === 'num' && cur.name && prev.kind === 'eq1' && prev.v === cur.name) return near(cur.first, prev.root);
+    if (cur.kind === 'eq1' && prev.kind === 'num' && prev.name === cur.v) return near(cur.root, prev.value);
+    if (cur.kind === 'eq2' && prev.kind === 'eq2' && cur.vars === prev.vars) return proportional(cur.vec, prev.vec);
+    return null;
+  }
+  /**
+   * Check work lines. Returns one entry per line: {status:'ok'|'bad'|'none', msg}.
+   * Only the first problem is marked 'bad'; lines after it are left neutral.
+   */
+  function analyze(lines) {
+    var out = [], prev = null, found = false;
+    lines.forEach(function (line, i) {
+      if (found) { out.push({ status: 'none' }); return; }
+      var pieces = String(line || '').split(/→|=>|;|\bso\b|\bthen\b/i).map(function (x) { return x.trim(); }).filter(Boolean);
+      var st = { status: pieces.length ? 'none' : 'empty' };
+      for (var k = 0; k < pieces.length; k++) {
+        var c = classify(pieces[k]);
+        if (!c) continue;
+        if ((c.kind === 'claim' || c.kind === 'num') && c.ok === false) {
+          st = { status: 'bad', msg: 'This line is not true. Recheck the arithmetic here.' }; break;
+        }
+        var fl = follows(prev, c);
+        if (fl === false) { st = { status: 'bad', msg: 'Something changed here that should not have. Compare this line with the one above it.' }; break; }
+        if (fl === true || c.kind === 'claim' || c.chain) st = { status: 'ok' };
+        prev = c;
+      }
+      if (st.status === 'bad') found = true;
+      out.push(st);
+    });
+    return out;
+  }
+
+  // ----- highlight what changed between two steps -----
+  function tokens(s) { return String(s).match(/\d*\.?\d+|[A-Za-z]+|\s+|[^\sA-Za-z\d]/g) || []; }
+  function diffHtml(prev, cur) {
+    var a = tokens(prev).filter(function (t) { return !/^\s+$/.test(t); }), bAll = tokens(cur), b = [];
+    bAll.forEach(function (t, i) { if (!/^\s+$/.test(t)) b.push({ t: t, i: i }); });
+    var n = a.length, m = b.length, L = [];
+    for (var i = 0; i <= n; i++) { L.push(new Array(m + 1).fill(0)); }
+    for (i = n - 1; i >= 0; i--) for (var j = m - 1; j >= 0; j--) L[i][j] = a[i] === b[j].t ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+    var keep = {}; i = 0; j = 0;
+    while (i < n && j < m) { if (a[i] === b[j].t) { keep[b[j].i] = 1; i++; j++; } else if (L[i + 1][j] >= L[i][j + 1]) i++; else j++; }
+    var shared = Object.keys(keep).length;
+    if (!m || shared / m < 0.35) return esc(cur);
+    var html = '', open = false;
+    bAll.forEach(function (t, idx) {
+      var isSpace = /^\s+$/.test(t), changed = !isSpace && !keep[idx];
+      if (changed && !open) { html += '<b class="chg">'; open = true; }
+      if (!changed && !isSpace && open) { html += '</b>'; open = false; }
+      html += esc(t);
+    });
+    if (open) html += '</b>';
+    return html.replace(/(\s+)<\/b>/g, '</b>$1');
+  }
+  return { analyze: analyze, classify: classify, diffHtml: diffHtml };
+})();
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+function toast(msg, ms) { var t = document.getElementById('toast'); if (!t) return; t.textContent = msg; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(function () { t.style.display = 'none'; }, ms || 3200); }
+function call(fn) {
+  var args = Array.prototype.slice.call(arguments, 1);
+  return new Promise(function (res, rej) {
+    var r = google.script.run.withSuccessHandler(res).withFailureHandler(function (e) { rej(e); });
+    r[fn].apply(r, args);
+  });
+}
+</script>
+
+<style>
+  .q { position:relative; }
+  .q .qhead { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
+  .q .qnum { font-family:Cambria, Caladea, Georgia, serif; font-weight:700; font-size:20px; color:var(--navy); }
+  .q .prompt { margin:4px 0 8px; }
+  .group { margin:22px 4px 4px; font-size:21px; border-bottom:3px solid var(--amber); padding-bottom:4px; }
+  .part { border-top:1px dashed var(--line); padding-top:10px; margin-top:10px; }
+  .part:first-of-type { border-top:none; }
+  .part .plabel { font-weight:600; margin-bottom:5px; }
+  .fb { margin-top:6px; padding:8px 10px; border-radius:9px; font-size:15.5px; display:none; }
+  .fb.correct { display:block; background:var(--goodbg); color:var(--good); font-weight:600; }
+  .fb.incorrect, .fb.limit, .fb.blocked { display:block; background:var(--badbg); color:#8a3c0c; }
+  .fb.invalid { display:block; background:#eef1f8; color:var(--navy); }
+  .fb.pending { display:block; background:#eef1f8; color:var(--navy); }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chips button { border-radius:999px; min-height:40px; }
+  .chips button.sel { background:var(--navy); color:#fff; border-color:var(--navy); }
+  .coach { margin-top:12px; background:#fff8ec; border:1px solid #f3d7a6; border-radius:12px; padding:10px; display:none; }
+  .coach .h { margin:6px 0; padding:8px 10px; background:#fff; border-radius:9px; border-left:4px solid var(--amber); }
+  .coach .h b { color:#7a4b00; }
+  .anslike-row { display:flex; gap:6px; align-items:flex-start; }
+  .anslike-row input { flex:1; }
+  .status { font-size:13px; opacity:.85; }
+  .banner { background:#fff3d6; border:1px solid #f0c674; color:#6b4500; border-radius:10px; padding:8px 12px; margin:10px 0; }
+  .banner.red { background:#ffe7e7; border-color:#f3a5a5; color:#7d1717; }
+  .center { text-align:center; }
+  .big { font-size:22px; }
+  .list-item { display:flex; align-items:center; gap:10px; }
+  .list-item .grow b { color:var(--navy); }
+  .mark { font-weight:700; margin-left:6px; }
+  .mark.ok { color:var(--good); } .mark.no { color:var(--bad); }
+  #fsCover { position:fixed; inset:0; background:var(--navy); color:#fff; z-index:90; display:none; align-items:center; justify-content:center; text-align:center; padding:20px; }
+  #fsCover h2 { color:#fff; margin-bottom:10px; }
+  @media (max-width:600px) { .bar .lbl { display:none; } .bar h1 { font-size:16px; min-width:0; } .bar button { padding:6px 10px; } .status { display:none; } }
+  .qimg img { max-width:100%; border:1px solid var(--line); border-radius:10px; cursor:zoom-in; display:block; margin:6px 0; background:#fff; }
+  .qimg .muted { font-size:13px; }
+  .solution { margin-top:12px; border:2px solid var(--navy); border-radius:12px; padding:10px 12px; background:#f4f6ff; }
+  .solution h4 { margin:0 0 6px; font-family:Cambria, Caladea, Georgia, serif; color:var(--navy); }
+  .solution ol { margin:0; padding-left:22px; } .solution li { margin:4px 0; }
+  button.solbtn { background:#fff; border:2px solid var(--navy); color:var(--navy); font-weight:600; }
+  .work { margin-top:12px; border:1px dashed #b9c3dc; border-radius:12px; padding:8px 10px; background:#fbfcff; }
+  .work .wl { display:flex; gap:6px; align-items:center; margin:5px 0; }
+  .work .wl .n { width:22px; text-align:right; color:var(--muted); font-size:14px; flex:none; }
+  .work .wl input { flex:1; font-family: Consolas, "Courier New", monospace; font-size:16px; }
+  .work .wl.bad input { border-color:#d9534f; background:#fff1f0; box-shadow:0 0 0 3px #ffd6d3; }
+  .work .wl.ok input { border-color:#9fd3b6; }
+  .work .wmsg { color:#a12a22; font-size:14.5px; margin:0 0 4px 28px; font-weight:600; }
+  .work .mark { width:18px; flex:none; text-align:center; }
+  .stepnote { background:#fff1f0; border:1px solid #f3b3ad; color:#8a221b; border-radius:9px; padding:8px 10px; margin-bottom:6px; font-weight:600; }
+  b.chg { background:#fff1c9; color:#1E2761; padding:0 2px; border-radius:3px; }
+  .solution li.ans { background:#fbe7c6; border-radius:6px; padding:2px 6px; font-weight:700; }
+  .solution li { font-family: Consolas, "Courier New", monospace; font-size:15.5px; }
+  .res-list button { display:block; width:100%; text-align:left; margin:6px 0; }
+  .viewer { width:100%; aspect-ratio:16/10; border:0; border-radius:10px; background:#000; }
+  .submitbar { position:sticky; bottom:0; background:rgba(247,248,252,.96); padding:10px 0; display:flex; gap:10px; align-items:center; border-top:1px solid var(--line); }
+  body.kp-open .submitbar { position:static; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <h1 id="barTitle">Algebra Coach</h1>
+  <span class="status" id="saveStatus"></span>
+  <button type="button" id="btnKeypad" onclick="Tools.toggleKeypad()" title="Show the math keypad">⌨<span class="lbl"> Keypad</span></button>
+  <button type="button" id="btnCalc" onclick="Tools.toggleCalc()" title="Calculator">🖩<span class="lbl"> Calculator</span></button>
+  <button type="button" id="btnHome" onclick="goHome()">Home</button>
+</div>
+
+<div class="wrap" id="view"><div class="card center muted">Loading…</div></div>
+
+<div id="fsCover"><div>
+  <h2>Return to the test</h2>
+  <p>You left full screen. This counts as leaving the test.</p>
+  <p id="fsCount"></p>
+  <button type="button" class="amber" onclick="enterFullscreen()">Go back to full screen</button>
+</div></div>
+
+<div class="modal-bg" id="modalBg"><div class="modal" id="modal"></div></div>
+<div class="toast" id="toast"></div>
+
+<style>
+  /* ---------- on-screen math keypad ---------- */
+  #keypad { position:fixed; left:0; right:0; bottom:0; z-index:60; background:#eef1f8; border-top:2px solid var(--navy); padding:8px; display:none; box-shadow:0 -6px 18px rgba(0,0,0,.12); }
+  #keypad .keys { display:grid; grid-template-columns:repeat(8, 1fr); gap:6px; max-width:760px; margin:0 auto; }
+  #keypad button { min-height:44px; padding:4px; font-size:18px; font-weight:600; background:#fff; }
+  #keypad button.op { background:var(--ice); color:var(--navy); }
+  #keypad button.act { background:var(--navy); color:#fff; }
+  #keypad .hint { text-align:center; font-size:13px; color:var(--muted); margin-top:4px; }
+  body.kp-open { padding-bottom:250px; }
+  @media (max-width:600px) { #keypad { padding:6px 4px; } #keypad .keys { gap:4px; } #keypad button { min-height:42px; font-size:16px; border-radius:8px; } body.kp-open { padding-bottom:260px; } }
+
+  /* ---------- calculator panel ---------- */
+  #calc { position:fixed; top:0; right:0; bottom:0; width:min(420px, 100vw); background:#fff; z-index:70; border-left:2px solid var(--navy); display:none; flex-direction:column; box-shadow:-8px 0 24px rgba(0,0,0,.15); }
+  #calc header { background:var(--navy); color:#fff; display:flex; align-items:center; gap:6px; padding:8px 10px; }
+  #calc header h3 { color:#fff; flex:1; font-size:18px; }
+  #calc header button { background:rgba(255,255,255,.12); color:#fff; border-color:rgba(255,255,255,.3); min-height:36px; padding:4px 10px; }
+  #calc header button.on { background:var(--amber); color:#111; }
+  #calc .body { flex:1; overflow:auto; padding:10px; }
+  #calcCanvas { width:100%; aspect-ratio:1/1; border:1px solid var(--line); border-radius:10px; touch-action:none; background:#fff; display:block; }
+  .fnrow { display:flex; align-items:center; gap:6px; margin:5px 0; }
+  .fnrow .sw { width:14px; height:14px; border-radius:50%; flex:none; }
+  .fnrow span.lbl { font-weight:700; white-space:nowrap; }
+  .fnrow .err { color:var(--bad); font-size:13px; }
+  #calcHistory div { padding:6px 4px; border-bottom:1px solid var(--line); }
+  #calcHistory .res { font-weight:700; color:var(--navy); text-align:right; }
+  .calcpad { display:grid; grid-template-columns:repeat(5,1fr); gap:6px; margin-top:8px; }
+  .calcpad button { min-height:42px; padding:2px; font-weight:600; }
+</style>
+
+<div id="keypad" class="noselect" aria-label="Math keypad">
+  <div class="keys" id="keys"></div>
+  <div class="hint">The keypad types into the box you last tapped.</div>
+</div>
+
+<div id="calc" aria-label="Calculator">
+  <header>
+    <h3>Calculator</h3>
+    <button type="button" id="calcTabGraph">Graph</button>
+    <button type="button" id="calcTabCalc" class="on">Calculate</button>
+    <button type="button" onclick="Tools.toggleCalc(false)" aria-label="Close calculator">✕</button>
+  </header>
+  <div class="body">
+    <div id="calcPaneCalc">
+      <div id="calcHistory" class="muted"></div>
+      <div class="row" style="margin-top:8px"><input type="text" id="calcIn" class="ans-like" placeholder="Type an expression, like (8 - 2)/(4 - 1)" autocomplete="off"><button type="button" class="primary" id="calcGo">=</button></div>
+      <div class="calcpad" id="calcPad"></div>
+    </div>
+    <div id="calcPaneGraph" style="display:none">
+      <canvas id="calcCanvas" width="800" height="800"></canvas>
+      <div class="row" style="margin:6px 0"><button type="button" class="small" id="zIn">Zoom +</button><button type="button" class="small" id="zOut">Zoom −</button><button type="button" class="small" id="zReset">Reset</button><span class="muted grow" id="trace">Drag to move. Tap to trace.</span></div>
+      <div id="fnList"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+var Tools = (function () {
+  var active = null, kpOn = false, calcOn = false, mode = 'basic';
+  var KEYS = [
+    ['7'], ['8'], ['9'], ['/', 'op'], ['(', 'op'], [')', 'op'], ['x', 'op'], ['y', 'op'],
+    ['4'], ['5'], ['6'], ['−', 'op', '-'], ['+', 'op'], ['=', 'op'], ['≤', 'op'], ['≥', 'op'],
+    ['1'], ['2'], ['3'], ['.'], [',', 'op'], ['( , )', 'op', '(,)'], ['<', 'op'], ['>', 'op'],
+    ['0'], ['␣', 'op', ' '], ['◀', 'act', 'left'], ['▶', 'act', 'right'], ['⌫', 'act', 'back'], ['Clear', 'act', 'clear'], ['Done', 'act', 'done']
+  ];
+  function targetOk(el) { return el && (el.classList.contains('ans') || el.classList.contains('ans-like')); }
+  document.addEventListener('focusin', function (e) { if (targetOk(e.target)) active = e.target; });
+
+  function insert(txt) {
+    var el = active; if (!el) { toast('Tap an answer box first.'); return; }
+    var s = el.selectionStart != null ? el.selectionStart : el.value.length, e = el.selectionEnd != null ? el.selectionEnd : s;
+    var v = el.value, caret;
+    if (txt === '(,)') { el.value = v.slice(0, s) + '(, )' + v.slice(e); caret = s + 1; }
+    else { el.value = v.slice(0, s) + txt + v.slice(e); caret = s + txt.length; }
+    el.setSelectionRange(caret, caret); el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  function key(k) {
+    var el = active;
+    if (k === 'done') { toggleKeypad(false); return; }
+    if (!el) { toast('Tap an answer box first.'); return; }
+    var s = el.selectionStart || 0, e = el.selectionEnd || 0;
+    if (k === 'back') { if (s === e && s > 0) { el.value = el.value.slice(0, s - 1) + el.value.slice(e); el.setSelectionRange(s - 1, s - 1); } else { el.value = el.value.slice(0, s) + el.value.slice(e); el.setSelectionRange(s, s); } el.dispatchEvent(new Event('input', { bubbles: true })); }
+    else if (k === 'left') el.setSelectionRange(Math.max(0, s - 1), Math.max(0, s - 1));
+    else if (k === 'right') el.setSelectionRange(s + 1, s + 1);
+    else if (k === 'clear') { el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })); }
+    if (el === document.getElementById('calcIn') && k === 'done') return;
+  }
+  function buildKeys() {
+    var box = document.getElementById('keys');
+    KEYS.forEach(function (k) {
+      var b = document.createElement('button'); b.type = 'button'; b.textContent = k[0]; if (k[1]) b.className = k[1];
+      b.addEventListener('pointerdown', function (ev) { ev.preventDefault(); });
+      b.addEventListener('click', function () {
+        var val = k[2] || k[0];
+        if (['back', 'left', 'right', 'clear', 'done'].indexOf(val) >= 0) key(val); else insert(val);
+        if (active && val !== 'done') active.focus({ preventScroll: true });
+      });
+      box.appendChild(b);
+    });
+  }
+  function setNativeKeyboard(off) {
+    document.querySelectorAll('input.ans, input.ans-like').forEach(function (i) { if (off) i.setAttribute('inputmode', 'none'); else i.removeAttribute('inputmode'); });
+  }
+  function toggleKeypad(on) {
+    kpOn = on === undefined ? !kpOn : on;
+    document.getElementById('keypad').style.display = kpOn ? 'block' : 'none';
+    document.body.classList.toggle('kp-open', kpOn);
+    setNativeKeyboard(kpOn);
+    var b = document.getElementById('btnKeypad'); if (b) b.classList.toggle('on', kpOn);
+    try { localStorage.setItem('ac_kp', kpOn ? '1' : '0'); } catch (e) {}
+  }
+
+  // ---------- calculator ----------
+  var fns = [{ src: '', fn: null, color: '#2b6cb0' }, { src: '', fn: null, color: '#c53030' }, { src: '', fn: null, color: '#2f855a' }, { src: '', fn: null, color: '#805ad5' }];
+  var view = { cx: 0, cy: 0, half: 10 }, traceX = null;
+
+  function setMode(m) {
+    mode = m || 'basic';
+    var cb = document.getElementById('btnCalc');
+    if (cb) cb.style.display = mode === 'off' ? 'none' : '';
+    document.getElementById('calcTabGraph').style.display = mode === 'graphing' ? '' : 'none';
+    if (mode !== 'graphing') tab('calc');
+    if (mode === 'off') toggleCalc(false);
+  }
+  function tab(which) {
+    document.getElementById('calcPaneCalc').style.display = which === 'calc' ? '' : 'none';
+    document.getElementById('calcPaneGraph').style.display = which === 'graph' ? '' : 'none';
+    document.getElementById('calcTabCalc').classList.toggle('on', which === 'calc');
+    document.getElementById('calcTabGraph').classList.toggle('on', which === 'graph');
+    if (which === 'graph') drawGraph();
+  }
+  function toggleCalc(on) {
+    calcOn = on === undefined ? !calcOn : on;
+    if (mode === 'off') calcOn = false;
+    var panel = document.getElementById('calc'), bar = document.querySelector('.bar');
+    if (bar) panel.style.top = Math.max(0, bar.getBoundingClientRect().bottom) + 'px';
+    panel.style.display = calcOn ? 'flex' : 'none';
+    var b = document.getElementById('btnCalc'); if (b) b.classList.toggle('on', calcOn);
+    if (calcOn && document.getElementById('calcPaneGraph').style.display !== 'none') drawGraph();
+  }
+  function evaluate() {
+    var inp = document.getElementById('calcIn'), src = inp.value.trim(); if (!src) return;
+    var hist = document.getElementById('calcHistory'), row = document.createElement('div');
+    try {
+      var v = AMath.compile(src)({}); var f = AMath.frac(v);
+      row.innerHTML = '<div>' + esc(src) + '</div><div class="res">= ' + esc(AMath.fmt(v)) + (f ? '  (' + esc(f) + ')' : '') + '</div>';
+      inp.value = '';
+    } catch (e) { row.innerHTML = '<div>' + esc(src) + '</div><div class="res" style="color:var(--bad)">' + esc(e.message) + '</div>'; }
+    hist.appendChild(row); hist.scrollTop = hist.scrollHeight;
+    while (hist.children.length > 30) hist.removeChild(hist.firstChild);
+  }
+  function buildCalcPad() {
+    var pad = document.getElementById('calcPad');
+    ['7', '8', '9', '÷', '(', '4', '5', '6', '×', ')', '1', '2', '3', '−', '^', '0', '.', '√', '+', '⌫'].forEach(function (k) {
+      var b = document.createElement('button'); b.type = 'button'; b.textContent = k;
+      b.addEventListener('pointerdown', function (ev) { ev.preventDefault(); });
+      b.onclick = function () {
+        var el = document.getElementById('calcIn'); active = el;
+        if (k === '⌫') key('back'); else insert(k === '√' ? '√(' : k);
+      };
+      pad.appendChild(b);
+    });
+  }
+  function buildFnList() {
+    var list = document.getElementById('fnList');
+    fns.forEach(function (f, i) {
+      var row = document.createElement('div'); row.className = 'fnrow';
+      row.innerHTML = '<span class="sw" style="background:' + f.color + '"></span><span class="lbl">y =</span>';
+      var inp = document.createElement('input'); inp.type = 'text'; inp.className = 'ans-like'; inp.placeholder = i === 0 ? 'e.g. -2x + 5' : ''; inp.autocomplete = 'off';
+      var err = document.createElement('div'); err.className = 'err';
+      inp.addEventListener('input', function () {
+        f.src = inp.value; err.textContent = '';
+        if (!inp.value.trim()) { f.fn = null; drawGraph(); return; }
+        try { var c = AMath.compile(inp.value); c({ x: 1 }); f.fn = c; } catch (e) { f.fn = null; err.textContent = e.message; }
+        drawGraph();
+      });
+      var wrap = document.createElement('div'); wrap.className = 'grow'; wrap.appendChild(inp); wrap.appendChild(err);
+      row.appendChild(wrap); list.appendChild(row);
+    });
+  }
+  function niceStep(span) { var raw = span / 10, p = Math.pow(10, Math.floor(Math.log10(raw))), n = raw / p; return (n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10) * p; }
+  function drawGraph() {
+    var cv = document.getElementById('calcCanvas'); if (!cv || document.getElementById('calcPaneGraph').style.display === 'none') return;
+    var ctx = cv.getContext('2d'), W = cv.width, H = cv.height, h = view.half;
+    var x0 = view.cx - h, x1 = view.cx + h, y0 = view.cy - h, y1 = view.cy + h;
+    function X(x) { return (x - x0) / (x1 - x0) * W; } function Y(y) { return H - (y - y0) / (y1 - y0) * H; }
+    ctx.clearRect(0, 0, W, H); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+    var st = niceStep(2 * h); ctx.lineWidth = 1; ctx.font = '22px Calibri, Carlito, Arial'; ctx.fillStyle = '#5b6478';
+    for (var gx = Math.ceil(x0 / st) * st; gx <= x1; gx += st) { ctx.strokeStyle = '#e6e9f1'; ctx.beginPath(); ctx.moveTo(X(gx), 0); ctx.lineTo(X(gx), H); ctx.stroke(); if (Math.abs(gx) > st / 2) ctx.fillText(+gx.toFixed(6), X(gx) + 3, Math.min(Math.max(Y(0) + 22, 22), H - 6)); }
+    for (var gy = Math.ceil(y0 / st) * st; gy <= y1; gy += st) { ctx.strokeStyle = '#e6e9f1'; ctx.beginPath(); ctx.moveTo(0, Y(gy)); ctx.lineTo(W, Y(gy)); ctx.stroke(); if (Math.abs(gy) > st / 2) ctx.fillText(+gy.toFixed(6), Math.min(Math.max(X(0) + 4, 4), W - 60), Y(gy) - 4); }
+    ctx.strokeStyle = '#1E2761'; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(X(0), 0); ctx.lineTo(X(0), H); ctx.moveTo(0, Y(0)); ctx.lineTo(W, Y(0)); ctx.stroke();
+    fns.forEach(function (f) {
+      if (!f.fn) return; ctx.strokeStyle = f.color; ctx.lineWidth = 4; ctx.beginPath(); var pen = false;
+      for (var i = 0; i <= W; i += 2) {
+        var x = x0 + i / W * (x1 - x0), y; try { y = f.fn({ x: x }); } catch (e) { y = NaN; }
+        if (!isFinite(y) || Math.abs(y) > 1e6) { pen = false; continue; }
+        if (pen) ctx.lineTo(i, Y(y)); else { ctx.moveTo(i, Y(y)); pen = true; }
+      }
+      ctx.stroke();
+    });
+    if (traceX !== null) {
+      var f0 = fns.filter(function (f) { return f.fn; })[0];
+      if (f0) { var ty = f0.fn({ x: traceX }); if (isFinite(ty)) { ctx.fillStyle = '#E8A33D'; ctx.beginPath(); ctx.arc(X(traceX), Y(ty), 10, 0, 7); ctx.fill(); document.getElementById('trace').textContent = 'x = ' + AMath.fmt(+traceX.toFixed(4)) + ', y = ' + AMath.fmt(+ty.toFixed(4)); } }
+    }
+  }
+  function wireGraph() {
+    var cv = document.getElementById('calcCanvas'), drag = null;
+    cv.addEventListener('pointerdown', function (e) { drag = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy, moved: false }; cv.setPointerCapture(e.pointerId); });
+    cv.addEventListener('pointermove', function (e) {
+      if (!drag) return; var r = cv.getBoundingClientRect(), dx = (e.clientX - drag.x) / r.width * 2 * view.half, dy = (e.clientY - drag.y) / r.height * 2 * view.half;
+      if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 6) drag.moved = true;
+      view.cx = drag.cx - dx; view.cy = drag.cy + dy; drawGraph();
+    });
+    cv.addEventListener('pointerup', function (e) {
+      if (drag && !drag.moved) { var r = cv.getBoundingClientRect(); var st = niceStep(2 * view.half) / 10; traceX = Math.round((view.cx - view.half + (e.clientX - r.left) / r.width * 2 * view.half) / st) * st; drawGraph(); }
+      drag = null;
+    });
+    document.getElementById('zIn').onclick = function () { view.half /= 2; drawGraph(); };
+    document.getElementById('zOut').onclick = function () { view.half *= 2; drawGraph(); };
+    document.getElementById('zReset').onclick = function () { view = { cx: 0, cy: 0, half: 10 }; traceX = null; document.getElementById('trace').textContent = 'Drag to move. Tap to trace.'; drawGraph(); };
+  }
+  function init() {
+    buildKeys(); buildCalcPad(); buildFnList(); wireGraph();
+    document.getElementById('calcTabGraph').onclick = function () { tab('graph'); };
+    document.getElementById('calcTabCalc').onclick = function () { tab('calc'); };
+    document.getElementById('calcGo').onclick = evaluate;
+    document.getElementById('calcIn').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); evaluate(); } });
+    try { if (localStorage.getItem('ac_kp') === '1') toggleKeypad(true); } catch (e) {}
+  }
+  return { init: init, toggleKeypad: toggleKeypad, toggleCalc: toggleCalc, setMode: setMode, refreshInputs: function () { setNativeKeyboard(kpOn); } };
+})();
+</script>
+
+
+<script>
+var S = { aid: null, A: null, mode: 'practice', status: null, answers: {}, results: {}, checks: {}, hints: {}, revealed: {}, solutionLocks: true,
+  checksPerPart: 3, lockAfter: 2, leaves: 0, events: [], dirty: false, keys: {}, shownAt: {}, saving: false, plotters: {} };
+var LOCAL = 'ac_draft_';
+var WEBAPP = location.href.split('?')[0].split('#')[0];
+var START_AID = (new URLSearchParams(location.search).get('a') || '').replace(/[^\w.\-]/g, '');
+
+// ---------------- integrity ----------------
+var leaveStart = null, leaveReason = '', fsWanted = false;
+var resourceOut = null;
+function startLeave(reason) {
+  if (!S.aid || S.status !== 'active') return;
+  if (leaveStart === null) { leaveStart = Date.now(); leaveReason = (resourceOut && Date.now() - resourceOut.t < 4000) ? 'resource' : reason; }
+}
+function endLeave() {
+  if (leaveStart === null || document.hidden) return;
+  var ms = Date.now() - leaveStart, reason = leaveReason; leaveStart = null; leaveReason = '';
+  S.events.push({ type: 'leave', ms: ms, reason: reason, where: reason === 'resource' && resourceOut ? resourceOut.where : '' });
+  if (reason === 'resource') resourceOut = null;
+  if (S.mode === 'test') save(true);
+}
+document.addEventListener('visibilitychange', function () { if (document.hidden) startLeave('tab'); else if (!fsWanted || isFullscreen()) endLeave(); });
+window.addEventListener('blur', function () { startLeave('window'); });
+window.addEventListener('focus', function () { if (!fsWanted || isFullscreen()) endLeave(); });
+function blockPaste(e) {
+  e.preventDefault();
+  var k = e.target && e.target.dataset ? e.target.dataset.key : '';
+  S.events.push({ type: 'paste', where: k || '' }); S.dirty = true;
+  toast('Pasting is turned off. Type your own answer.');
+}
+document.addEventListener('paste', blockPaste, true);
+document.addEventListener('drop', function (e) { e.preventDefault(); }, true);
+document.addEventListener('copy', function (e) { if (window.__allowCopy) return; e.preventDefault(); S.events.push({ type: 'copy' }); }, true);
+document.addEventListener('cut', function (e) { e.preventDefault(); }, true);
+document.addEventListener('contextmenu', function (e) { if (!e.target.closest || !e.target.closest('input,textarea')) e.preventDefault(); });
+
+function isFullscreen() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+function enterFullscreen() {
+  var el = document.documentElement, fn = el.requestFullscreen || el.webkitRequestFullscreen;
+  document.getElementById('fsCover').style.display = 'none';
+  if (fn) { try { var p = fn.call(el); if (p && p.catch) p.catch(function () { fsWanted = false; endLeave(); }); } catch (e) { fsWanted = false; } }
+  else fsWanted = false;
+  setTimeout(endLeave, 400);
+}
+function onFsChange() {
+  if (!fsWanted || S.status !== 'active') return;
+  if (!isFullscreen()) {
+    startLeave('fullscreen');
+    document.getElementById('fsCount').textContent = 'Times left so far: ' + (S.leaves + 1) + ' of ' + S.lockAfter + '. At ' + S.lockAfter + ' the test locks.';
+    document.getElementById('fsCover').style.display = 'flex';
+  }
+}
+document.addEventListener('fullscreenchange', onFsChange);
+document.addEventListener('webkitfullscreenchange', onFsChange);
+
+// ---------------- saving ----------------
+function localSave() { try { localStorage.setItem(LOCAL + S.aid, JSON.stringify({ t: Date.now(), answers: S.answers })); } catch (e) {} }
+function localLoad(aid) { try { return JSON.parse(localStorage.getItem(LOCAL + aid) || 'null'); } catch (e) { return null; } }
+function setSaveStatus(t) { document.getElementById('saveStatus').textContent = t; }
+
+function save(force) {
+  if (!S.aid || S.status !== 'active') return Promise.resolve();
+  if (S.saving) { if (force) S.pendingForce = true; return Promise.resolve(); }
+  if (!force && !S.dirty && !S.events.length) return Promise.resolve();
+  var evs = S.events.splice(0), answers = S.answers;
+  S.saving = true; S.dirty = false; setSaveStatus('Saving…');
+  return call('api_save', S.aid, answers, evs).then(function (r) {
+    S.saving = false;
+    setSaveStatus('Saved ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }));
+    if (r.leaves !== undefined) { S.leaves = r.leaves; updateLeaveBanner(); }
+    if (r.status === 'locked') { S.status = 'locked'; showLocked(); }
+    if (r.status === 'submitted') { S.status = 'submitted'; }
+    if (S.pendingForce) { S.pendingForce = false; save(true); }
+  }).catch(function () {
+    S.saving = false; S.dirty = true; S.events = evs.concat(S.events);
+    setSaveStatus('Offline: saved on this device');
+    if (S.pendingForce) { S.pendingForce = false; setTimeout(function () { save(true); }, 3000); }
+  });
+}
+setInterval(function () { save(false); }, 12000);
+window.addEventListener('beforeunload', function () { if (S.aid) localSave(); });
+
+// ---------------- home ----------------
+function goHome() {
+  if (S.aid && S.status === 'active' && S.mode === 'test') { toast('Submit the test before leaving it.'); return; }
+  var p = S.aid ? save(true) : Promise.resolve();
+  p.then(function () { S.aid = null; fsWanted = false; Tools.toggleCalc(false); Tools.setMode('basic'); loadHome(); });
+}
+function loadHome() {
+  document.getElementById('barTitle').textContent = 'Algebra Coach';
+  document.getElementById('btnHome').style.display = 'none';
+  setSaveStatus('');
+  call('api_bootstrap').then(function (b) {
+    var v = document.getElementById('view');
+    if (b.role === 'none') { v.innerHTML = '<div class="card"><h2>Not on a roster yet</h2><p>You are signed in as <b>' + esc(b.email) + '</b>. Ask your teacher to add this email to the class roster.</p></div>'; return; }
+    var h = '<div class="card"><h2>Hi' + (b.name ? ' ' + esc(b.name) : '') + '</h2><p class="muted">Pick an assignment. Your work saves as you go. Use the Coach for hints. It will help you think it through, not give you the answer.</p>' +
+      (b.role === 'teacher' ? '<p><a href="' + esc(WEBAPP) + '?view=teacher" target="_top">Open the teacher dashboard</a></p>' : '') + '</div>';
+    if (!b.assignments.length) h += '<div class="card muted">No assignments are open right now.</div>';
+    b.assignments.forEach(function (a) {
+      var st = { 'new': 'Not started', active: 'In progress', locked: 'Locked: see your teacher', submitted: 'Submitted' }[a.state] || a.state;
+      h += '<div class="card list-item"><div class="grow"><b>' + esc(a.section) + ' ' + esc(a.title) + '</b><br><span class="muted">' + esc(st) +
+        (a.due ? ' · Due ' + esc(a.due) : '') + (a.status !== 'open' ? ' · (closed to students)' : '') + '</span></div>' +
+        (a.mode === 'test' ? '<span class="tag test">TEST</span>' : '<span class="tag">PRACTICE</span>') +
+        '<button type="button" class="primary" onclick="openAssignment(\'' + esc(a.id) + '\')">' + (a.state === 'submitted' ? 'View' : 'Open') + '</button></div>';
+    });
+    v.innerHTML = h;
+  }).catch(showError);
+}
+function showError(e) { document.getElementById('view').innerHTML = '<div class="card"><h2>Something went wrong</h2><p>' + esc(e && e.message || e) + '</p><button type="button" onclick="loadHome()">Back</button></div>'; }
+
+// ---------------- open ----------------
+function openAssignment(aid) {
+  document.getElementById('view').innerHTML = '<div class="card center muted">Opening…</div>';
+  call('api_open', aid).then(function (r) {
+    S.aid = aid; S.A = r.assignment; S.mode = r.assignment.mode; S.status = r.status;
+    S.answers = r.answers || {}; S.results = r.results || {}; S.checks = r.checks || {}; S.hints = r.hints || {};
+    S.revealed = r.revealed || {}; S.solutionLocks = r.solutionLocks !== false;
+    S.checksPerPart = r.checksPerPart; S.lockAfter = r.lockAfterLeaves; S.leaves = r.leaves || 0; S.events = []; S.keys = {}; S.shownAt = {};
+    var loc = localLoad(aid);
+    if (loc && loc.answers && r.status === 'active') Object.keys(loc.answers).forEach(function (k) { if (!S.revealed[k.split('.')[0]]) S.answers[k] = loc.answers[k]; });
+    document.getElementById('barTitle').textContent = S.A.section + ' ' + S.A.title;
+    document.getElementById('btnHome').style.display = '';
+    Tools.setMode(S.A.calculator);
+    if (r.status === 'locked') return showLocked();
+    if (r.status === 'submitted') return showSubmitted(null);
+    if (S.mode === 'test') return showTestStart();
+    render();
+  }).catch(showError);
+}
+
+function showTestStart() {
+  var v = document.getElementById('view');
+  v.innerHTML = '<div class="card"><span class="tag test">TEST MODE</span><h2 style="margin-top:8px">' + esc(S.A.section + ' ' + S.A.title) + '</h2>' +
+    '<ul><li>Hints, the Coach, and answer checking are off.</li><li>The test opens in full screen.</li>' +
+    '<li>Leaving the page, switching tabs or apps, or leaving full screen is recorded.</li>' +
+    '<li><b>After ' + S.lockAfter + ' exits, the test locks.</b> Your answers are saved, and your teacher has to unlock it.</li>' +
+    '<li>Your work saves automatically.</li></ul>' +
+    '<button type="button" class="amber big" onclick="startTest()">Start test</button></div>';
+}
+function startTest() { fsWanted = true; enterFullscreen(); render(); }
+
+function showLocked() {
+  fsWanted = false; document.getElementById('fsCover').style.display = 'none';
+  try { if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (e) {}
+  Tools.toggleCalc(false);
+  var v = document.getElementById('view');
+  v.innerHTML = '<div class="card center"><div style="font-size:48px">🔒</div><h2>This test is locked</h2>' +
+    '<p>The page was left ' + S.lockAfter + ' or more times. Your answers are saved.</p><p><b>Ask your teacher to unlock it.</b></p>' +
+    '<button type="button" class="primary" onclick="checkUnlock()">My teacher unlocked it</button></div>';
+  clearInterval(S.lockPoll); S.lockPoll = setInterval(checkUnlock, 15000);
+}
+function checkUnlock() {
+  if (!S.aid) { clearInterval(S.lockPoll); return; }
+  call('api_bootstrap').then(function (b) {
+    var a = b.assignments.filter(function (x) { return x.id === S.aid; })[0];
+    if (a && a.state === 'active') { clearInterval(S.lockPoll); toast('Unlocked. Opening the test.'); openAssignment(S.aid); }
+  });
+}
+
+// ---------------- render ----------------
+function key(q, p) { return q.id + '.' + p.id; }
+
+function render() {
+  var A = S.A, v = document.getElementById('view'), h = '';
+  h += '<div class="card"><div class="row"><span class="tag ' + (S.mode === 'test' ? 'test' : '') + '">' + (S.mode === 'test' ? 'TEST' : 'PRACTICE') + '</span>' +
+    '<span class="muted">' + esc(A.course || '') + ' · Larson Algebra 1 ' + esc(A.pages || '') + '</span></div>' +
+    (S.mode === 'test' ? '<p class="muted">Hints and answer checking are off. Do your own work.</p>' :
+      '<p class="muted">Work each problem on paper, then enter your answer and press <b>Check</b>. You get ' + S.checksPerPart + ' checks per box. Stuck? Press <b>Coach</b> for a hint.</p>') +
+    (S.mode !== 'test' && A.resources && A.resources.length ? '<button type="button" class="small" onclick="showMaterials()">📚 Lesson materials (' + A.resources.length + ')</button>' : '') +
+    '<div id="leaveBanner"></div><div id="bonusBanner"></div></div>';
+  var lastGroup = null;
+  A.questions.forEach(function (q) {
+    if (q.group !== lastGroup) { h += '<h2 class="group">' + esc(q.group) + '</h2>'; lastGroup = q.group; }
+    h += '<div class="card q" id="q_' + esc(q.id) + '" data-qid="' + esc(q.id) + '"><div class="qhead"><span class="qnum">' + esc(q.label) + '.</span>' +
+      (q.fromPresentation ? '<span class="tag amber">FROM THE PRESENTATION · ' + esc(q.fromPresentation) + '</span>' : '') + '</div>' +
+      '<div class="prompt noselect">' + esc(q.prompt) + '</div>';
+    if (q.table) h += '<table class="data noselect">' + q.table.map(function (r) { return '<tr>' + r.map(function (c) { return '<td>' + esc(c) + '</td>'; }).join('') + '</tr>'; }).join('') + '</table>';
+    if (q.image) h += '<div class="qimg"><img id="img_' + esc(q.id) + '" alt="' + esc(q.image.alt || 'Picture for this problem') + '"><div class="muted">Tap the picture to enlarge it.</div></div>';
+    if (q.figure) h += '<div class="fig" id="fig_' + esc(q.id) + '"></div>';
+    if (q.note) h += '<div class="muted">' + esc(q.note) + '</div>';
+    q.parts.forEach(function (p) { h += partHtml(q, p); });
+    h += '<div class="row" style="margin-top:10px"><button type="button" class="small" onclick="toggleWork(\'' + esc(q.id) + '\')">✏️ Work space</button>' +
+      (S.mode !== 'test' && q.search ? '<button type="button" class="small" onclick="showVideos(\'' + esc(q.id) + '\')">▶ Help videos</button>' : '') +
+      '<span class="muted">Scrap paper is fine too. Just enter your answer.</span></div><div class="work" id="work_' + esc(q.id) + '" style="display:none"></div>';
+    if (S.mode !== 'test' && q.hintCount) {
+      h += '<div class="row" style="margin-top:10px"><button type="button" class="amber small" onclick="coach(\'' + esc(q.id) + '\')">💡 Coach</button><span class="muted">Hints get more detailed each time. The last one is a worked example of a similar problem.</span></div>' +
+        '<div class="coach" id="coach_' + esc(q.id) + '"></div>';
+    }
+    if (S.mode !== 'test' && q.hasSolution) h += '<div id="solrow_' + esc(q.id) + '" style="display:none;margin-top:10px"><button type="button" class="small solbtn" onclick="askSolution(\'' + esc(q.id) + '\')">📖 Show full solution</button> <span class="muted">You used every hint and every check. You can see this exact problem worked out, but it costs your no-AI bonus.</span></div>' +
+      '<div id="sol_' + esc(q.id) + '"></div>';
+    h += '</div>';
+  });
+  h += '<div class="submitbar"><span class="muted grow" id="progress"></span><button type="button" class="primary" onclick="confirmSubmit()">Submit ' + (S.mode === 'test' ? 'test' : 'assignment') + '</button></div>';
+  v.innerHTML = h;
+
+  A.questions.forEach(function (q) {
+    if (q.figure) AGraph.figure(document.getElementById('fig_' + q.id), q.figure);
+    q.parts.forEach(function (p) { wirePart(q, p); });
+    if (S.hints[q.id] && S.hints[q.id].length) showHints(q.id, S.hints[q.id], false);
+    if (q.image) loadImage(q);
+    var wk = S.answers[q.id + '.__work'];
+    if (wk && wk.some(function (x) { return String(x).trim(); })) { renderWork(q.id); document.getElementById('work_' + q.id).style.display = 'block'; }
+    if (S.revealed[q.id]) showSolution(q.id, S.revealed[q.id]);
+    updateSolutionRow(q.id);
+  });
+  Tools.refreshInputs();
+  observeShown();
+  updateProgress();
+  updateLeaveBanner();
+  updateBonusBanner();
+}
+function updateBonusBanner() {
+  var b = document.getElementById('bonusBanner'); if (!b) return;
+  var n = Object.keys(S.revealed).length;
+  b.innerHTML = n ? '<div class="banner">You viewed ' + n + ' full solution' + (n > 1 ? 's' : '') + ', so this assignment is not eligible for the no-AI bonus.</div>' : '';
+}
+function loadImage(q) {
+  call('api_image', q.image.key).then(function (url) {
+    var img = document.getElementById('img_' + q.id); if (!img) return;
+    img.src = url;
+    img.onclick = function () { modal('<img src="' + url + '" style="width:100%;height:auto" alt="' + esc(q.image.alt || '') + '"><div class="row" style="margin-top:8px"><button type="button" onclick="closeModal()">Close</button></div>'); document.getElementById('modal').style.maxWidth = '1100px'; };
+  }).catch(function () { var img = document.getElementById('img_' + q.id); if (img) img.alt = 'Picture could not load. Refresh the page.'; });
+}
+function solutionReady(q) {
+  if (!q.hasSolution || S.revealed[q.id]) return false;
+  var hintsDone = (S.hints[q.id] || []).length >= q.hintCount;
+  var outOfChecks = q.parts.some(function (p) { var k = key(q, p); return p.type !== 'written' && (S.checks[k] || 0) >= S.checksPerPart && S.results[k] !== 'correct'; });
+  return hintsDone && outOfChecks;
+}
+function updateSolutionRow(qid) {
+  var q = S.A.questions.filter(function (x) { return x.id === qid; })[0], row = document.getElementById('solrow_' + qid);
+  if (row && q) row.style.display = solutionReady(q) ? 'block' : 'none';
+}
+function askSolution(qid) {
+  modal('<h2>Show the full solution?</h2><p>You will see this exact problem worked out step by step.</p>' +
+    '<ul><li><b>You give up the 10% no-AI bonus</b> for this whole assignment.</li>' +
+    (S.solutionLocks ? '<li>Your answers on this problem lock as they are now. You cannot change them after you see the solution.</li>' : '') +
+    '<li>Your teacher will see that you viewed it.</li></ul>' +
+    '<div class="row"><button type="button" onclick="closeModal()">Keep trying</button><button type="button" class="primary" onclick="getSolution(\'' + esc(qid) + '\')">Show me the solution</button></div>');
+}
+function getSolution(qid) {
+  closeModal();
+  var mine = {}; Object.keys(S.answers).forEach(function (k) { if (k.split('.')[0] === qid) mine[k] = S.answers[k]; });
+  call('api_solution', S.aid, qid, mine).then(function (r) {
+    if (r.denied) { toast(r.msg, 5000); return; }
+    S.revealed[qid] = r.steps; S.solutionLocks = r.locked !== false;
+    showSolution(qid, r.steps); updateSolutionRow(qid); updateBonusBanner();
+  }).catch(function (e) { toast('Could not load the solution: ' + (e.message || e)); });
+}
+function showSolution(qid, steps) {
+  var box = document.getElementById('sol_' + qid); if (!box) return;
+  box.innerHTML = '<div class="solution"><h4>Full solution</h4><div class="muted" style="margin-bottom:4px">Highlighted parts are what changed from the step before.</div><ol>' + steps.map(function (s, i) {
+      var isAns = /^(answer|range|domain|location)\b/i.test(s.trim());
+      return '<li' + (isAns ? ' class="ans"' : '') + '>' + (i && !isAns ? AStep.diffHtml(steps[i - 1], s) : esc(s)) + '</li>';
+    }).join('') + '</ol>' +
+    '<div class="muted" style="margin-top:6px">Rework it on paper following these steps. That is how it sticks.</div></div>';
+  if (!S.solutionLocks) return;
+  var q = S.A.questions.filter(function (x) { return x.id === qid; })[0];
+  q.parts.forEach(function (p) {
+    var k = key(q, p), id = 'p_' + k.replace(/\W/g, '_'), el = document.getElementById(id);
+    if (!el) return;
+    if (p.type === 'graph') { if (S.plotters[k]) S.plotters[k].disable(); }
+    else if (p.type === 'choice') el.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
+    else el.readOnly = true;
+    var chk = document.getElementById('chk_' + id); if (chk) chk.disabled = true;
+    var left = document.getElementById('left_' + id); if (left) left.textContent = 'Locked after viewing the solution';
+  });
+}
+
+function partHtml(q, p) {
+  var k = key(q, p), id = 'p_' + k.replace(/\W/g, '_'), h = '<div class="part" data-key="' + esc(k) + '">';
+  if (p.label) h += '<div class="plabel noselect">' + esc(p.label) + '</div>';
+  var val = S.answers[k];
+  if (p.type === 'choice') {
+    h += '<div class="chips" id="' + id + '">' + p.options.map(function (o) {
+      return '<button type="button" class="' + (val === o ? 'sel' : '') + '" data-val="' + esc(o) + '">' + esc(o) + '</button>';
+    }).join('') + '</div>';
+  } else if (p.type === 'graph') {
+    h += '<div id="' + id + '"></div>';
+    if (p.mode === 'points' && p.pointCount) h += '<div class="muted">Plot ' + p.pointCount + ' point' + (p.pointCount > 1 ? 's' : '') + '.</div>';
+    if (p.mode === 'line') h += '<div class="muted">Plot at least two points on the line. The tool connects them.</div>';
+  } else if (p.type === 'written') {
+    h += '<textarea class="ans" id="' + id + '" data-key="' + esc(k) + '" rows="3" spellcheck="true" placeholder="Explain in your own words.">' + esc(val || '') + '</textarea>';
+  } else {
+    var ph = { number: 'Your answer', pair: '(x, y)', set: 'a, b, c, ...', inequality: 'e.g. 0 ≤ x ≤ 5', equation: 'e.g. y = 2x + 1', solutions: '(a, b), (c, d), (e, f)' }[p.type] || '';
+    h += '<input type="text" class="ans" id="' + id + '" data-key="' + esc(k) + '" value="' + esc(val || '') + '" placeholder="' + esc(ph) + '" autocomplete="off" autocapitalize="off" spellcheck="false">';
+    if (p.type === 'inequality') h += '<div class="muted">≤ and ≥ are on the keypad. You can also type &lt;= or &gt;=.</div>';
+  }
+  var res = S.results[k];
+  h += '<div class="fb ' + (res === 'correct' ? 'correct' : '') + '" id="fb_' + id + '">' + (res === 'correct' ? '✓ Correct' : '') + '</div>';
+  if (S.mode !== 'test' && p.type !== 'written') {
+    var used = S.checks[k] || 0;
+    h += '<div class="row" style="margin-top:6px"><button type="button" class="small" id="chk_' + id + '" onclick="check(\'' + esc(q.id) + '\',\'' + esc(p.id) + '\')"' + (res === 'correct' ? ' disabled' : '') + '>Check</button>' +
+      '<span class="muted" id="left_' + id + '">' + (res === 'correct' ? '' : (S.checksPerPart - used) + ' check' + (S.checksPerPart - used === 1 ? '' : 's') + ' left') + '</span></div>';
+  }
+  return h + '</div>';
+}
+
+function wirePart(q, p) {
+  var k = key(q, p), id = 'p_' + k.replace(/\W/g, '_'), el = document.getElementById(id);
+  if (!el) return;
+  function changed(v) { if (S.revealed[q.id] && S.solutionLocks) return; S.answers[k] = v; S.dirty = true; localSave(); updateProgress(); clearFb(id); }
+  if (p.type === 'choice') {
+    el.querySelectorAll('button').forEach(function (b) {
+      b.onclick = function () { el.querySelectorAll('button').forEach(function (x) { x.classList.remove('sel'); }); b.classList.add('sel'); changed(b.dataset.val); };
+    });
+  } else if (p.type === 'graph') {
+    S.plotters[k] = AGraph.plotter(el, p, S.answers[k], function (st) { changed(st); });
+    if (S.results[k] === 'correct' && S.mode !== 'test') S.plotters[k].disable();
+  } else {
+    el.addEventListener('input', function () { changed(el.value); });
+    el.addEventListener('keydown', function (e) { S.keys[k] = (S.keys[k] || 0) + 1; if (e.key === 'Enter' && el.tagName === 'INPUT' && S.mode !== 'test') { e.preventDefault(); check(q.id, p.id); } });
+    if (S.results[k] === 'correct' && S.mode !== 'test') el.readOnly = true;
+  }
+}
+function clearFb(id) { var fb = document.getElementById('fb_' + id); if (fb && !fb.classList.contains('correct')) { fb.className = 'fb'; fb.textContent = ''; } }
+
+function observeShown() {
+  if (!('IntersectionObserver' in window)) return;
+  var io = new IntersectionObserver(function (ents) {
+    ents.forEach(function (e) { if (e.isIntersecting && !S.shownAt[e.target.dataset.qid]) S.shownAt[e.target.dataset.qid] = Date.now(); });
+  }, { threshold: 0.4 });
+  document.querySelectorAll('.q').forEach(function (n) { io.observe(n); });
+}
+
+function updateProgress() {
+  var total = 0, done = 0;
+  S.A.questions.forEach(function (q) { q.parts.forEach(function (p) { total++; var v = S.answers[key(q, p)]; if (v && (typeof v === 'string' ? v.trim() : (v.points && v.points.length))) done++; }); });
+  var el = document.getElementById('progress'); if (el) el.textContent = done + ' of ' + total + ' answer boxes filled';
+  return { total: total, done: done };
+}
+function updateLeaveBanner() {
+  var b = document.getElementById('leaveBanner'); if (!b) return;
+  if (S.mode === 'test') b.innerHTML = '<div class="banner ' + (S.leaves ? 'red' : '') + '">Times you have left the test: <b>' + S.leaves + ' of ' + S.lockAfter + '</b>. At ' + S.lockAfter + ' the test locks.</div>';
+  else b.innerHTML = S.leaves ? '<div class="banner">Leaving this page is recorded for your teacher (' + S.leaves + ' so far).</div>' : '';
+}
+
+// ---------------- check & coach ----------------
+function check(qid, pid) {
+  var q = S.A.questions.filter(function (x) { return x.id === qid; })[0], p = q.parts.filter(function (x) { return x.id === pid; })[0];
+  var k = qid + '.' + pid, id = 'p_' + k.replace(/\W/g, '_'), resp = S.answers[k];
+  var fb = document.getElementById('fb_' + id), btn = document.getElementById('chk_' + id);
+  if (resp === undefined || resp === '' || (resp && resp.points && !resp.points.length)) { fb.className = 'fb invalid'; fb.textContent = 'Enter an answer first.'; return; }
+  btn.disabled = true; fb.className = 'fb invalid'; fb.textContent = 'Checking…';
+  var meta = { msSinceShown: S.shownAt[qid] ? Date.now() - S.shownAt[qid] : 99999, keys: S.keys[k] || 0 };
+  call('api_check', S.aid, qid, pid, resp, meta).then(function (r) {
+    fb.className = 'fb ' + r.status;
+    fb.textContent = r.status === 'correct' ? '✓ Correct' : r.msg;
+    if (r.nudge) fb.textContent += ' ' + r.nudge;
+    S.results[k] = r.status;
+    if (r.checksLeft !== undefined) { S.checks[k] = S.checksPerPart - r.checksLeft; var left = document.getElementById('left_' + id); if (left) left.textContent = r.status === 'correct' ? '' : r.checksLeft + ' check' + (r.checksLeft === 1 ? '' : 's') + ' left'; }
+    if (r.status === 'correct') {
+      var el = document.getElementById(id); if (el && el.tagName === 'INPUT') el.readOnly = true;
+      if (S.plotters[k]) S.plotters[k].disable();
+    } else btn.disabled = r.status === 'limit' || r.checksLeft === 0;
+    if (r.status === 'limit') S.checks[k] = S.checksPerPart;
+    if (r.status === 'incorrect') checkSteps(qid, 'check');
+    updateSolutionRow(qid);
+  }).catch(function (e) { btn.disabled = false; fb.className = 'fb invalid'; fb.textContent = 'Could not check right now. Your answer is saved. Try again in a moment.'; });
+}
+
+function coach(qid) {
+  var box = document.getElementById('coach_' + qid);
+  box.style.display = 'block';
+  if (!box.innerHTML) box.innerHTML = '<div class="muted">Asking the coach…</div>';
+  checkSteps(qid, 'coach');
+  call('api_hint', S.aid, qid).then(function (r) { S.hints[qid] = r.hints; showHints(qid, r.hints, !r.done, r.msg); updateSolutionRow(qid); }).catch(function () { toast('The coach could not load. Try again.'); });
+}
+function showHints(qid, hints, more, msg) {
+  var box = document.getElementById('coach_' + qid); if (!box) return;
+  var q = S.A.questions.filter(function (x) { return x.id === qid; })[0];
+  box.style.display = 'block';
+  var note = S.stepNote && S.stepNote[qid];
+  box.innerHTML = (note ? '<div class="stepnote">' + esc(note) + '</div>' : '') + hints.map(function (h, i) {
+    var lab = i === q.hintCount - 1 ? 'Worked example (similar problem)' : 'Hint ' + (i + 1);
+    return '<div class="h"><b>' + lab + ':</b> ' + esc(h) + '</div>';
+  }).join('') + (msg ? '<div class="muted">' + esc(msg) + '</div>' : '') +
+    (hints.length < q.hintCount ? '<button type="button" class="small" onclick="coach(\'' + esc(qid) + '\')">' + (hints.length ? 'I need more help' : 'Show a hint') + '</button>' : '<div class="muted">That is all the coach has. Try the problem again with the example as a guide.</div>');
+}
+
+// ---------------- submit ----------------
+function confirmSubmit() {
+  var pr = updateProgress(), blanks = pr.total - pr.done;
+  modal('<h2>Submit ' + (S.mode === 'test' ? 'test' : 'assignment') + '?</h2>' +
+    (blanks ? '<p class="banner">' + blanks + ' answer box' + (blanks === 1 ? ' is' : 'es are') + ' still empty.</p>' : '<p>All answer boxes have something in them.</p>') +
+    '<p>After you submit, you cannot change your answers.</p><div class="row"><button type="button" onclick="closeModal()">Keep working</button><button type="button" class="primary" onclick="submitNow()">Submit</button></div>');
+}
+function submitNow() {
+  closeModal();
+  var evs = S.events.splice(0);
+  document.getElementById('view').insertAdjacentHTML('afterbegin', '<div class="card center muted" id="submitting">Submitting…</div>');
+  call('api_submit', S.aid, S.answers, evs).then(function (r) {
+    S.status = 'submitted'; fsWanted = false;
+    try { if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (e) {}
+    try { localStorage.removeItem(LOCAL + S.aid); } catch (e) {}
+    showSubmitted(r);
+  }).catch(function (e) { S.events = evs.concat(S.events); var s = document.getElementById('submitting'); if (s) s.remove(); toast('Could not submit. Check your connection and try again.'); });
+}
+function showSubmitted(r) {
+  Tools.toggleCalc(false);
+  var v = document.getElementById('view'), h = '<div class="card center"><div style="font-size:44px">✅</div><h2>Submitted</h2>';
+  if (r && r.score) {
+    h += '<p class="big"><b>' + r.score.auto + ' / ' + r.score.max + '</b> points checked automatically</p>';
+    if (r.score.writtenMax) h += '<p class="muted">Your teacher will grade the written answers (' + r.score.writtenMax + ' points).</p>';
+  } else h += '<p>Your teacher will release your score.</p>';
+  h += '<button type="button" onclick="goHome()">Back to assignments</button></div>';
+  if (r && r.detail) {
+    h += '<div class="card"><h3>How you did</h3><p class="muted">Review the ones marked ✗ with your notes or the answer key when your teacher releases it.</p>';
+    S.A.questions.forEach(function (q) {
+      var marks = q.parts.map(function (p) { var d = r.detail[key(q, p)]; return d === 'correct' ? '<span class="mark ok">✓</span>' : d === 'pending' ? '<span class="mark muted">✎</span>' : '<span class="mark no">✗</span>'; }).join('');
+      h += '<div>' + esc(q.label) + '. ' + marks + '</div>';
+    });
+    h += '</div>';
+  }
+  v.innerHTML = h;
+}
+
+function modal(html) { document.getElementById('modal').innerHTML = html; document.getElementById('modalBg').style.display = 'flex'; }
+function closeModal() { document.getElementById('modalBg').style.display = 'none'; }
+
+// ---------------- on-screen work ----------------
+S.stepNote = {};
+function workLines(qid) { var w = S.answers[qid + '.__work']; return Array.isArray(w) && w.length ? w : ['']; }
+function toggleWork(qid) {
+  var box = document.getElementById('work_' + qid);
+  var show = box.style.display === 'none';
+  box.style.display = show ? 'block' : 'none';
+  if (show) { renderWork(qid); var ins = box.querySelectorAll('input'); if (ins.length) ins[ins.length - 1].focus(); }
+}
+function renderWork(qid, marks) {
+  var box = document.getElementById('work_' + qid); if (!box) return;
+  var lines = workLines(qid), h = '';
+  lines.forEach(function (ln, i) {
+    var m = marks && marks[i];
+    h += '<div class="wl ' + (m ? m.status : '') + '"><span class="n">' + (i + 1) + '</span><input type="text" class="ans" data-key="' + esc(qid) + '.__work" data-i="' + i + '" value="' + esc(ln) + '" placeholder="' + (i ? 'Next step' : 'Start with the equation or expression from the problem') + '" autocomplete="off" spellcheck="false">' +
+      '<span class="mark">' + (m && m.status === 'ok' ? '<span style="color:var(--good)">✓</span>' : m && m.status === 'bad' ? '<span style="color:#c0392b">✗</span>' : '') + '</span>' +
+      '<button type="button" class="small ghost" title="Delete this step" onclick="delStep(\'' + esc(qid) + '\',' + i + ')">✕</button></div>' +
+      (m && m.status === 'bad' ? '<div class="wmsg">' + esc(m.msg) + '</div>' : '');
+  });
+  h += '<div class="row" style="margin-top:4px"><button type="button" class="small primary" onclick="addStep(\'' + esc(qid) + '\')">+ Add step</button>' +
+    (S.mode !== 'test' ? '<button type="button" class="small" onclick="checkSteps(\'' + esc(qid) + '\', \'button\')">Check my steps</button>' : '') +
+    '<span class="muted">Add step copies your last line so you can rewrite the next version.</span></div>';
+  box.innerHTML = h;
+  box.querySelectorAll('input').forEach(function (inp) {
+    inp.addEventListener('input', function () {
+      var arr = workLines(qid).slice(); arr[+inp.dataset.i] = inp.value; S.answers[qid + '.__work'] = arr; S.dirty = true; localSave();
+      var row = inp.closest('.wl'); if (row) { row.classList.remove('bad', 'ok'); var mk = row.querySelector('.mark'); if (mk) mk.innerHTML = ''; var msg = row.nextElementSibling; if (msg && msg.classList.contains('wmsg')) msg.remove(); }
+    });
+    inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); addStep(qid); } });
+  });
+  Tools.refreshInputs();
+}
+function addStep(qid) {
+  var arr = workLines(qid).slice();
+  if (arr.length >= 40) { toast('That is the most steps one problem can hold.'); return; }
+  arr.push(arr[arr.length - 1] || ''); S.answers[qid + '.__work'] = arr; S.dirty = true; localSave();
+  renderWork(qid);
+  var ins = document.querySelectorAll('#work_' + qid + ' input'), last = ins[ins.length - 1];
+  if (last) { last.focus(); last.setSelectionRange(last.value.length, last.value.length); }
+}
+function delStep(qid, i) {
+  var arr = workLines(qid).slice(); arr.splice(i, 1); if (!arr.length) arr = [''];
+  S.answers[qid + '.__work'] = arr; S.dirty = true; localSave(); renderWork(qid);
+}
+/** Look for the first line where the math stops matching. Never shows the answer. */
+function checkSteps(qid, why) {
+  if (S.mode === 'test') return null;
+  var lines = workLines(qid).filter(function (x) { return String(x).trim(); });
+  var box = document.getElementById('work_' + qid);
+  if (!lines.length) {
+    S.stepNote[qid] = why === 'coach' ? '' : S.stepNote[qid];
+    if (why === 'button') toast('Write your steps first, one line per step.');
+    return null;
+  }
+  var marks = AStep.analyze(workLines(qid));
+  box.style.display = 'block'; renderWork(qid, marks);
+  var bad = marks.findIndex(function (m) { return m.status === 'bad'; });
+  if (bad >= 0) {
+    S.stepNote[qid] = 'Look at step ' + (bad + 1) + ' of your work. ' + marks[bad].msg;
+    if (why !== 'coach') toast('Check step ' + (bad + 1) + ' in your work space.', 4000);
+  } else {
+    S.stepNote[qid] = '';
+    if (why === 'button') toast(marks.some(function (m) { return m.status === 'ok'; }) ? 'No mistakes found between your steps. If the answer is still wrong, check the first line against the problem.' : 'The checker could not read these steps. Write each step as an equation or expression.', 5000);
+  }
+  return bad;
+}
+
+// ---------------- lesson materials and videos ----------------
+function embedUrl(u) {
+  var m;
+  if ((m = u.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/|youtube\.com\/embed\/)([\w-]{6,})/))) return 'https://www.youtube-nocookie.com/embed/' + m[1];
+  if ((m = u.match(/docs\.google\.com\/presentation\/d\/([\w-]+)/))) return 'https://docs.google.com/presentation/d/' + m[1] + '/embed';
+  if ((m = u.match(/docs\.google\.com\/document\/d\/([\w-]+)/))) return 'https://docs.google.com/document/d/' + m[1] + '/preview';
+  if ((m = u.match(/drive\.google\.com\/file\/d\/([\w-]+)/))) return 'https://drive.google.com/file/d/' + m[1] + '/preview';
+  if ((m = u.match(/drive\.google\.com\/open\?id=([\w-]+)/))) return 'https://drive.google.com/file/d/' + m[1] + '/preview';
+  return null;
+}
+var KIND_ICON = { slides: '📊', notes: '📝', video: '▶', link: '🔗' };
+function openResource(i) {
+  var r = S.A.resources[i], e = embedUrl(r.url);
+  if (e) {
+    modal('<h2>' + esc(r.title) + '</h2><iframe class="viewer" src="' + esc(e) + '" allow="fullscreen; encrypted-media" allowfullscreen></iframe>' +
+      '<div class="row" style="margin-top:8px"><button type="button" onclick="closeModal()">Close</button><span class="muted">If it does not load, your school may block this site.</span></div>');
+    document.getElementById('modal').style.maxWidth = '980px';
+  } else openOutside(r.url, r.title);
+}
+function openOutside(url, label) {
+  resourceOut = { t: Date.now(), where: label || url };
+  window.open(url, '_blank', 'noopener');
+}
+function resButtons(list) {
+  return list.map(function (r) { var i = S.A.resources.indexOf(r); return '<button type="button" onclick="openResource(' + i + ')">' + (KIND_ICON[r.kind] || '🔗') + ' ' + esc(r.title) + (r.group ? ' <span class="muted">· ' + esc(r.group) + '</span>' : '') + '</button>'; }).join('');
+}
+function showMaterials() {
+  var list = S.A.resources || [], order = ['slides', 'notes', 'video', 'link'], names = { slides: 'Slides', notes: 'Notes and study guides', video: 'Videos', link: 'Other links' };
+  var h = '<h2>Lesson materials</h2><div class="res-list">';
+  order.forEach(function (k) { var g = list.filter(function (r) { return (r.kind || 'link') === k; }); if (g.length) h += '<h3 style="margin-top:10px">' + names[k] + '</h3>' + resButtons(g); });
+  modal(h + '</div><div class="row" style="margin-top:10px"><button type="button" onclick="closeModal()">Close</button></div>');
+}
+function showVideos(qid) {
+  var q = S.A.questions.filter(function (x) { return x.id === qid; })[0];
+  var mine = (S.A.resources || []).filter(function (r) { return (r.kind === 'video' || r.kind === 'slides' || r.kind === 'notes') && (!r.group || r.group === q.group); });
+  var h = '<h2>Help for: ' + esc(q.group) + '</h2>';
+  h += mine.length ? '<p class="muted">From your teacher:</p><div class="res-list">' + resButtons(mine) + '</div>' : '<p class="muted">Your teacher has not added a video for this section yet.</p>';
+  var url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(q.search);
+  h += '<div class="card" style="margin-top:10px"><b>Search YouTube</b><p class="muted">Searches for lessons on the topic: <i>' + esc(q.search) + '</i>. Opens in a new tab. Watch how the method works, then come back and try the problem yourself.</p>' +
+    '<button type="button" class="primary" onclick="openOutside(\'' + esc(url) + '\', \'YouTube: ' + esc(q.search).replace(/'/g, '') + '\'); closeModal();">Search YouTube</button></div>' +
+    '<div class="row" style="margin-top:10px"><button type="button" onclick="closeModal()">Close</button></div>';
+  modal(h);
+}
+
+// ================= Static-site version: replaces a few student-page functions =================
+
+function loadHome() {
+  document.getElementById('barTitle').textContent = 'Algebra Coach';
+  document.getElementById('btnHome').style.display = 'none';
+  setSaveStatus('');
+  call('api_bootstrap').then(function (b) {
+    var v = document.getElementById('view');
+    if (b.needProfile) { profileForm(null); return; }
+    var p = b.name || '';
+    var h = '<div class="card"><h2>Hi ' + esc(p) + '</h2><p class="muted">Pick an assignment. Your work saves on this device as you go. Use the Coach for hints. It will help you think it through, not give you the answer. When you finish, press Submit, then send your work to your teacher.</p>' +
+      '<button type="button" class="small ghost" onclick="profileForm(true)">Not you? Change name</button></div>';
+    if (!b.assignments.length) h += '<div class="card muted">No assignments are open right now.</div>';
+    b.assignments.forEach(function (a) {
+      var st = { 'new': 'Not started', active: 'In progress', locked: 'Locked: see your teacher', submitted: 'Submitted' }[a.state] || a.state;
+      h += '<div class="card list-item"><div class="grow"><b>' + esc(a.section) + ' ' + esc(a.title) + '</b><br><span class="muted">' + esc(st) + (a.due ? ' · Due ' + esc(a.due) : '') + '</span></div>' +
+        (a.mode === 'test' ? '<span class="tag test">TEST</span>' : '<span class="tag">PRACTICE</span>') +
+        '<button type="button" class="primary" onclick="openAssignment(\'' + esc(a.id) + '\')">' + (a.state === 'submitted' ? 'View' : 'Open') + '</button></div>';
+    });
+    v.innerHTML = h;
+  }).catch(showError);
+}
+
+function profileForm(changing) {
+  call('api_profile').then(function (p) {
+    p = p || {};
+    document.getElementById('view').innerHTML = '<div class="card" style="max-width:520px;margin:20px auto"><h2>' + (changing ? 'Change your name' : 'Welcome to Algebra Coach') + '</h2>' +
+      '<p class="muted">Type your name the way it appears on your class list. Your teacher uses it to match your work.</p>' +
+      '<label class="f" style="font-weight:600">First and last name</label><input type="text" id="pf_name" value="' + esc(p.name || '') + '" autocomplete="name">' +
+      '<label class="f" style="font-weight:600;display:block;margin-top:10px">Class period</label><input type="text" id="pf_period" value="' + esc(p.period || '') + '" placeholder="e.g. 3">' +
+      '<div class="row" style="margin-top:14px">' + (changing ? '<button type="button" onclick="loadHome()">Cancel</button>' : '') + '<button type="button" class="primary" onclick="saveProfile()">Continue</button></div>' +
+      '<p class="muted" style="margin-top:12px">Use your own school device or account. Your work is saved in this browser until you send it.</p></div>';
+  });
+}
+function saveProfile() {
+  call('api_setProfile', document.getElementById('pf_name').value, document.getElementById('pf_period').value)
+    .then(function () { loadHome(); if (START_AID) setTimeout(function () { openAssignment(START_AID); START_AID = ''; }, 200); })
+    .catch(function (e) { toast(e.message || String(e)); });
+}
+
+function showLocked() {
+  fsWanted = false; document.getElementById('fsCover').style.display = 'none';
+  try { if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (e) {}
+  Tools.toggleCalc(false);
+  var v = document.getElementById('view');
+  v.innerHTML = '<div class="card center" style="max-width:560px;margin:20px auto"><div style="font-size:48px">🔒</div><h2>This test is locked</h2>' +
+    '<p>The page was left ' + S.lockAfter + ' or more times. Your answers are saved.</p>' +
+    '<p>Show your teacher this lock code:</p><div id="lockCode" style="font-size:34px;font-weight:700;letter-spacing:6px;color:var(--navy)">......</div>' +
+    '<p style="margin-top:14px">Your teacher will give you an unlock code:</p>' +
+    '<div class="row" style="justify-content:center"><input type="text" id="unlockIn" style="max-width:180px;text-align:center;font-size:22px;letter-spacing:4px;text-transform:uppercase" maxlength="8" autocomplete="off"><button type="button" class="primary" onclick="tryUnlock()">Unlock</button></div></div>';
+  call('api_lockInfo', S.aid).then(function (i) { if (i) document.getElementById('lockCode').textContent = i.code; });
+}
+function checkUnlock() {}
+function tryUnlock() {
+  call('api_unlock', S.aid, document.getElementById('unlockIn').value).then(function (r) {
+    if (r.ok) { toast('Unlocked. Opening the test.'); openAssignment(S.aid); } else toast('That code does not match. Check it with your teacher.');
+  }).catch(function (e) { toast(e.message || String(e)); });
+}
+
+function showSubmitted(r) {
+  Tools.toggleCalc(false);
+  var v = document.getElementById('view'), h = '<div class="card center"><div style="font-size:44px">✅</div><h2>Submitted</h2>';
+  if (r && r.score) {
+    h += '<p class="big"><b>' + r.score.auto + ' / ' + r.score.max + '</b> points checked automatically</p>';
+    if (r.score.writtenMax) h += '<p class="muted">Your teacher will grade the written answers (' + r.score.writtenMax + ' points).</p>';
+  }
+  h += '</div><div class="card" id="sendCard" style="border:2px solid var(--amber)"><h3>Send your work to your teacher</h3><p class="muted">Preparing your receipt…</p></div>';
+  if (r && r.detail) {
+    h += '<div class="card"><h3>How you did</h3><p class="muted">Review the ones marked ✗ with your notes or the answer key when your teacher releases it.</p>';
+    S.A.questions.forEach(function (q) {
+      var marks = q.parts.map(function (p) { var d = r.detail[key(q, p)]; return d === 'correct' ? '<span class="mark ok">✓</span>' : d === 'pending' ? '<span class="mark muted">✎</span>' : '<span class="mark no">✗</span>'; }).join('');
+      h += '<div>' + esc(q.label) + '. ' + marks + '</div>';
+    });
+    h += '</div>';
+  }
+  h += '<div class="card center"><button type="button" onclick="goHome()">Back to assignments</button></div>';
+  v.innerHTML = h;
+  call('api_receipt', S.aid).then(renderSend).catch(function (e) {
+    document.getElementById('sendCard').innerHTML = '<h3>Send your work to your teacher</h3><p class="err">Could not make the receipt: ' + esc(e.message || e) + '</p>';
+  });
+}
+function formLink(rc) {
+  var u = rc.formUrl; if (!u) return '';
+  var vals = { NAME: rc.name + (rc.period ? ' (period ' + rc.period + ')' : ''), CODE1: rc.parts[0] || '', CODE2: rc.parts[1] || '', CODE3: rc.parts[2] || '' };
+  return u.replace(/=(NAME|CODE1|CODE2|CODE3)(?=&|$|#)/g, function (m, k) { return '=' + encodeURIComponent(vals[k]); });
+}
+function renderSend(rc) {
+  var box = document.getElementById('sendCard'); if (!box) return;
+  window.__rc = rc;
+  var link = formLink(rc), h = '<h3>Send your work to your teacher</h3>';
+  if (link) {
+    h += '<p><b>Step 1:</b> press the button. A form opens with your work already filled in.</p>' +
+      '<p><button type="button" class="amber big" onclick="window.open(formLink(window.__rc), \'_blank\', \'noopener\')">Send to my teacher</button></p>' +
+      '<p><b>Step 2:</b> on the form, press <b>Submit</b>. Your work is not turned in until you do.</p>';
+  } else h += '<p>Copy each code below and turn it in the way your teacher asked.</p>';
+  h += '<details' + (link ? '' : ' open') + ' style="margin-top:8px"><summary class="muted">If the form opens empty, copy the codes yourself</summary>' +
+    '<p class="muted">Name: <b>' + esc(rc.name) + '</b>' + (rc.period ? ', period ' + esc(rc.period) : '') + '</p>' +
+    rc.parts.map(function (p, i) {
+      return '<div class="row" style="margin:6px 0"><b>Receipt code' + (i ? ' part ' + (i + 1) : '') + '</b><button type="button" class="small" onclick="copyPart(' + i + ')">Copy</button><span class="muted">' + p.length + ' characters</span></div>';
+    }).join('') + '</details>' +
+    (rc.tooLong ? '<p class="err">Your receipt is very long. Copy every part.</p>' : '') +
+    '<p class="muted" style="margin-top:8px">You can come back to this assignment and press View to send it again.</p>';
+  box.innerHTML = h;
+}
+function copyPart(i) {
+  var t = window.__rc.parts[i];
+  var done = function () { toast('Copied part ' + (i + 1) + '. Paste it into the form.'); };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, function () { fallbackCopy(t); done(); });
+  else { fallbackCopy(t); done(); }
+}
+function fallbackCopy(t) {
+  // The page blocks copy events for answers; this temporary box is allowed.
+  var ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select();
+  window.__allowCopy = true;
+  try { document.execCommand('copy'); } catch (e) {}
+  window.__allowCopy = false;
+  ta.remove();
+}
+
+Tools.init();
+loadHome();
+// Opened from a Classroom link (?a=assignment id): go straight to that assignment.
+if (START_AID) call('api_profile').then(function (p) { if (p) setTimeout(function () { openAssignment(START_AID); START_AID = ''; }, 300); });
+</script>
+</body>
+</html>
