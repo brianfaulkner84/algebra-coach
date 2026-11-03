@@ -427,6 +427,7 @@ var Grader = (function () {
     equation: 'Write an equation like y = 2x + 1.',
     solutions: 'Enter ordered pairs separated by commas, like (1, 5), (2, 3).',
     graph: 'Click points on the grid to plot them.',
+    table: 'Fill in each row with an x-value and its y-value. Use numbers like -3, 2.5, or 3/4.',
     choice: 'Pick an answer from the list.'
   };
 
@@ -558,6 +559,52 @@ var Grader = (function () {
     return res('incorrect', good.length + ' of your pairs work so far. Substitute each pair into the equation to test it. You need ' + need + ' that work.');
   }
 
+  function rowList(idx) {
+    var n = idx.map(function (i) { return i + 1; });
+    return n.length === 1 ? 'Row ' + n[0] : 'Rows ' + n.slice(0, -1).join(', ') + ' and ' + n[n.length - 1];
+  }
+  /** x/y table of values. resp = {rows: [[x, y], ...]} as typed strings. */
+  function gradeTable(part, resp) {
+    var raw = (resp && resp.rows) || [], rows = [], idx = [];
+    for (var i = 0; i < raw.length; i++) {
+      var xs = String((raw[i] || [])[0] == null ? '' : raw[i][0]).trim(), ys = String((raw[i] || [])[1] == null ? '' : raw[i][1]).trim();
+      if (part.xs) xs = String(part.xs[i]);
+      if (!xs && !ys) continue;
+      if (!ys) return res('invalid', 'Row ' + (i + 1) + ' needs a y-value.');
+      if (!xs) return res('invalid', 'Row ' + (i + 1) + ' needs an x-value.');
+      var xn = parseNumber(xs), yn = parseNumber(ys);
+      if (!xn.ok || xn.undef || !yn.ok || yn.undef) return res('invalid', 'Row ' + (i + 1) + ' could not be read. ' + FORMAT_MSG.table);
+      rows.push([xn.value, yn.value]); idx.push(i);
+    }
+    var need = part.xs ? part.xs.length : (part.rows || 3);
+    if (rows.length < need) return res('invalid', part.xs ? 'Find the y-value for every x-value in the table.' : 'Fill in at least ' + need + ' rows. You have ' + rows.length + '.');
+    var eq = part.line ? lineFromString(part.line) : null;
+    function fits(p) {
+      if (part.points) return hasPoint(part.points, p, 1e-6, 1e-6);
+      return onLine(eq, p);
+    }
+    if (!part.xs) {
+      for (var a = 0; a < rows.length; a++) for (var b = a + 1; b < rows.length; b++) {
+        if (Math.abs(rows[a][0] - rows[b][0]) < 1e-9 && !(eq && Math.abs(eq.coef.y || 0) < 1e-12)) {
+          var r0 = res('incorrect', 'Rows ' + (idx[a] + 1) + ' and ' + (idx[b] + 1) + ' use the same x-value. Pick a different x for each row.'); r0.rows = [idx[b]]; return r0;
+        }
+      }
+    }
+    if (part.domain) {
+      var lo = part.domain.lo, hi = part.domain.hi;
+      var out = []; rows.forEach(function (p, j) { if ((lo != null && p[0] < lo - 1e-9) || (hi != null && p[0] > hi + 1e-9)) out.push(idx[j]); });
+      if (out.length) { var r1 = res('incorrect', rowList(out) + ': the x-value is outside the domain. Only use inputs the domain allows.'); r1.rows = out; return r1; }
+    }
+    var bad = [], swapped = 0;
+    rows.forEach(function (p, j) { if (!fits(p)) { bad.push(idx[j]); if (fits([p[1], p[0]])) swapped++; } });
+    if (!bad.length) return res('correct');
+    var msg;
+    if (eq && Math.abs(eq.coef.y || 0) < 1e-12) msg = rowList(bad) + (bad.length > 1 ? ' do' : ' does') + ' not fit. In this equation every point has the same x-value.';
+    else if (swapped && swapped === bad.length) msg = rowList(bad) + ': x and y look switched. Put the input in the x column and the output in the y column.';
+    else msg = rowList(bad) + ': recheck the y-value. Substitute that x-value into the equation again, one step at a time.';
+    var r2 = res('incorrect', msg); r2.rows = bad; return r2;
+  }
+
   function gradeChoice(part, raw) {
     if (!raw) return res('invalid', FORMAT_MSG.choice);
     if (normWord(raw) === normWord(part.answer)) return res('correct');
@@ -588,7 +635,8 @@ var Grader = (function () {
     var eq = lineFromString(part.line);
     var distinct = [];
     pts.forEach(function (p) { if (!hasPoint(distinct, p, 1e-9, 1e-9)) distinct.push(p); });
-    if (distinct.length < 2) return res('invalid', 'Plot at least two points so the line can be drawn.');
+    var minPts = part.minPoints || 3;
+    if (distinct.length < minPts) return res('invalid', 'Plot at least ' + minPts + ' points. Two points make the line. The third checks your work. You have ' + distinct.length + '.');
     var off = distinct.filter(function (p) { return !onLine(eq, p); });
     if (!off.length) {
       if (part.domain) {
@@ -641,6 +689,7 @@ var Grader = (function () {
         case 'solutions': return gradeSolutions(part, resp);
         case 'choice': return gradeChoice(part, resp);
         case 'graph': return gradeGraph(part, resp);
+        case 'table': return gradeTable(part, resp);
         case 'written': return (resp && String(resp).trim().length >= 3) ? res('pending', 'Saved. Your teacher will read this one.') : res('invalid', 'Write a sentence or two in your own words.');
       }
     } catch (e) {
@@ -662,6 +711,9 @@ var Grader = (function () {
           if (!sample.points.length) return;
         } else if (p.type === 'solutions') {
           if (!p.sample) return; sample = p.sample;
+        } else if (p.type === 'table') {
+          var sr = p.sampleRows || (p.points && p.xs ? p.xs.map(function (x) { var m = p.points.filter(function (q) { return Math.abs(q[0] - x) < 1e-9; })[0]; return m || [x, '']; }) : null);
+          if (!sr) return; sample = { rows: sr.map(function (r) { return [String(r[0]), String(r[1])]; }) };
         } else sample = Array.isArray(p.answer) ? p.answer[0] : String(p.answer);
         var r = grade(p, sample, q.parts);
         if (r.status !== 'correct') problems.push(q.label + (p.label ? ' ' + p.label : '') + ': ' + r.status + ' ' + r.msg);
@@ -797,7 +849,7 @@ function stripRuntime_(a) {
 }
 
 /** Strip everything a student must not see: answers, hints, mistake messages, sample answers. */
-var SAFE_PART_KEYS = ['id', 'label', 'type', 'options', 'grid', 'mode', 'extent', 'domain', 'vars', 'count'];
+var SAFE_PART_KEYS = ['id', 'label', 'type', 'options', 'grid', 'mode', 'extent', 'domain', 'vars', 'count', 'rows', 'xs', 'xvar', 'yvar', 'minPoints'];
 function studentView_(a) {
   return {
     id: a.id, section: a.section, title: a.title, pages: a.pages, course: a.course, mode: a.mode,
@@ -806,7 +858,7 @@ function studentView_(a) {
     questions: a.questions.map(function (q) {
       return {
         id: q.id, label: q.label, group: q.group, prompt: q.prompt, figure: q.figure || null, table: q.table || null,
-        note: q.note || '', fromPresentation: q.fromPresentation || '', hintCount: (q.hints || []).length,
+        note: q.note || '', start: q.start || '', fromPresentation: q.fromPresentation || '', hintCount: (q.hints || []).length,
         image: q.image ? { key: q.image.key, alt: q.image.alt || '' } : null, hasSolution: !!(q.solution && q.solution.length),
         search: a.mode === 'test' ? '' : (q.search || ('algebra 1 ' + (q.group || a.title || ''))),
         parts: q.parts.map(function (p) {
@@ -1289,7 +1341,7 @@ function t_import(json, overwrite) {
 
 function validateAssignment_(a) {
   var e = [];
-  var TYPES = ['number', 'choice', 'pair', 'set', 'inequality', 'equation', 'solutions', 'graph', 'written'];
+  var TYPES = ['number', 'choice', 'pair', 'set', 'inequality', 'equation', 'solutions', 'graph', 'table', 'written'];
   if (!a || typeof a !== 'object') return ['Not an assignment object.'];
   if (!a.id || !/^[\w.\-]+$/.test(a.id)) e.push('id is required (letters, numbers, dot, dash).');
   if (!a.title) e.push('title is required.');
@@ -1306,12 +1358,13 @@ function validateAssignment_(a) {
     if (q.search && typeof q.search !== 'string') e.push(w + 'search must be text.');
     (q.parts || []).forEach(function (p) {
       if (TYPES.indexOf(p.type) < 0) e.push(w + 'unknown part type ' + p.type);
-      if (p.type !== 'written' && p.type !== 'solutions' && p.type !== 'graph' && (p.answer === undefined || p.answer === '')) e.push(w + 'part ' + p.id + ' needs an answer.');
+      if (p.type !== 'written' && p.type !== 'solutions' && p.type !== 'graph' && p.type !== 'table' && (p.answer === undefined || p.answer === '')) e.push(w + 'part ' + p.id + ' needs an answer.');
       if (p.type === 'choice' && (!Array.isArray(p.options) || p.options.indexOf(p.answer) < 0)) e.push(w + 'choice answer must be one of the options.');
       if (p.type === 'graph' && !p.grid) e.push(w + 'graph part needs a grid.');
       if (p.type === 'graph' && p.mode === 'line' && !p.line) e.push(w + 'line graph needs a line equation.');
       if (p.type === 'graph' && p.mode === 'points' && !Array.isArray(p.answer)) e.push(w + 'points graph needs a list of answer points.');
       if (p.type === 'solutions' && !p.equation) e.push(w + 'solutions part needs an equation.');
+      if (p.type === 'table' && !p.line && !(Array.isArray(p.points) && Array.isArray(p.xs))) e.push(w + 'table part needs a line equation, or xs plus answer points.');
     });
   });
   return e;
@@ -1949,6 +2002,14 @@ function call(fn) {
   .solution h4 { margin:0 0 6px; font-family:Cambria, Caladea, Georgia, serif; color:var(--navy); }
   .solution ol { margin:0; padding-left:22px; } .solution li { margin:4px 0; }
   button.solbtn { background:#fff; border:2px solid var(--navy); color:var(--navy); font-weight:600; }
+  table.xy { border-collapse:collapse; margin:6px 0; }
+  table.xy th { background:#eef1f8; color:var(--navy); font-weight:700; padding:5px 10px; border:1px solid #c9d2e6; min-width:70px; }
+  table.xy td { border:1px solid #c9d2e6; padding:3px; text-align:center; }
+  table.xy td.fx { font-family: Consolas, "Courier New", monospace; font-size:16px; padding:3px 10px; background:#f7f9fd; }
+  table.xy input { width:96px; text-align:center; font-family: Consolas, "Courier New", monospace; font-size:16px; }
+  table.xy tr.bad input { border-color:#d9534f; background:#fff1f0; box-shadow:0 0 0 3px #ffd6d3; }
+  .work .arrow { margin:-2px 0 -2px 30px; color:var(--muted); font-size:14px; }
+  .work .wl .n { width:52px !important; }
   .work { margin-top:12px; border:1px dashed #b9c3dc; border-radius:12px; padding:8px 10px; background:#fbfcff; }
   .work .wl { display:flex; gap:6px; align-items:center; margin:5px 0; }
   .work .wl .n { width:22px; text-align:right; color:var(--muted); font-size:14px; flex:none; }
@@ -2402,10 +2463,11 @@ function render() {
     if (q.image) h += '<div class="qimg"><img id="img_' + esc(q.id) + '" alt="' + esc(q.image.alt || 'Picture for this problem') + '"><div class="muted">Tap the picture to enlarge it.</div></div>';
     if (q.figure) h += '<div class="fig" id="fig_' + esc(q.id) + '"></div>';
     if (q.note) h += '<div class="muted">' + esc(q.note) + '</div>';
-    q.parts.forEach(function (p) { h += partHtml(q, p); });
-    h += '<div class="row" style="margin-top:10px"><button type="button" class="small" onclick="toggleWork(\'' + esc(q.id) + '\')">✏️ Work space</button>' +
+    var wh = '<div class="row" style="margin-top:10px"><button type="button" class="small" onclick="toggleWork(\'' + esc(q.id) + '\')">✏️ Step-by-step work</button>' +
       (S.mode !== 'test' && q.search ? '<button type="button" class="small" onclick="showVideos(\'' + esc(q.id) + '\')">▶ Help videos</button>' : '') +
       '<span class="muted">Scrap paper is fine too. Just enter your answer.</span></div><div class="work" id="work_' + esc(q.id) + '" style="display:none"></div>';
+    var ph = ''; q.parts.forEach(function (p) { ph += partHtml(q, p); });
+    h += q.start ? wh + ph : ph + wh;
     if (S.mode !== 'test' && q.hintCount) {
       h += '<div class="row" style="margin-top:10px"><button type="button" class="amber small" onclick="coach(\'' + esc(q.id) + '\')">💡 Coach</button><span class="muted">Hints get more detailed each time. The last one is a worked example of a similar problem.</span></div>' +
         '<div class="coach" id="coach_' + esc(q.id) + '"></div>';
@@ -2423,7 +2485,7 @@ function render() {
     if (S.hints[q.id] && S.hints[q.id].length) showHints(q.id, S.hints[q.id], false);
     if (q.image) loadImage(q);
     var wk = S.answers[q.id + '.__work'];
-    if (wk && wk.some(function (x) { return String(x).trim(); })) { renderWork(q.id); document.getElementById('work_' + q.id).style.display = 'block'; }
+    if (q.start || (wk && wk.some(function (x) { return String(x).trim(); }))) { renderWork(q.id); document.getElementById('work_' + q.id).style.display = 'block'; }
     if (S.revealed[q.id]) showSolution(q.id, S.revealed[q.id]);
     updateSolutionRow(q.id);
   });
@@ -2502,7 +2564,10 @@ function partHtml(q, p) {
   } else if (p.type === 'graph') {
     h += '<div id="' + id + '"></div>';
     if (p.mode === 'points' && p.pointCount) h += '<div class="muted">Plot ' + p.pointCount + ' point' + (p.pointCount > 1 ? 's' : '') + '.</div>';
-    if (p.mode === 'line') h += '<div class="muted">Plot at least two points on the line. The tool connects them.</div>';
+    if (p.mode === 'line') h += '<div class="muted">' + ((p.minPoints || 3) > 2 ? 'Plot at least 3 points. Two points make the line. The third one checks your work.' : 'Plot at least 2 points. The tool connects them.') + '</div>';
+  } else if (p.type === 'table') {
+    h += '<div id="' + id + '">' + tableHtml(p, val) + '</div>';
+    h += '<div class="muted">' + (p.xs ? 'Find the y-value for each x-value.' : 'Pick at least ' + p.rows + ' x-values. Find the y-value for each one. Easy x-values like -1, 0, and 1 work well.') + '</div>';
   } else if (p.type === 'written') {
     h += '<textarea class="ans" id="' + id + '" data-key="' + esc(k) + '" rows="3" spellcheck="true" placeholder="Explain in your own words.">' + esc(val || '') + '</textarea>';
   } else {
@@ -2528,6 +2593,8 @@ function wirePart(q, p) {
     el.querySelectorAll('button').forEach(function (b) {
       b.onclick = function () { el.querySelectorAll('button').forEach(function (x) { x.classList.remove('sel'); }); b.classList.add('sel'); changed(b.dataset.val); };
     });
+  } else if (p.type === 'table') {
+    wireTable(q, p, el, changed);
   } else if (p.type === 'graph') {
     S.plotters[k] = AGraph.plotter(el, p, S.answers[k], function (st) { changed(st); });
     if (S.results[k] === 'correct' && S.mode !== 'test') S.plotters[k].disable();
@@ -2537,6 +2604,51 @@ function wirePart(q, p) {
     if (S.results[k] === 'correct' && S.mode !== 'test') el.readOnly = true;
   }
 }
+function tableRows(p, val) {
+  var rows = (val && Array.isArray(val.rows)) ? val.rows.map(function (r) { return [String(r[0] == null ? '' : r[0]), String(r[1] == null ? '' : r[1])]; }) : [];
+  var n = p.xs ? p.xs.length : Math.max(p.rows || 3, rows.length);
+  while (rows.length < n) rows.push(['', '']);
+  if (p.xs) rows = rows.slice(0, n).map(function (r, i) { return [String(p.xs[i]), r[1]]; });
+  return rows;
+}
+function tableHtml(p, val, bad) {
+  var rows = tableRows(p, val), xv = p.xvar || 'x', yv = p.yvar || 'y';
+  var h = '<table class="xy"><tr><th>' + esc(xv) + '</th><th>' + esc(yv) + '</th></tr>';
+  rows.forEach(function (r, i) {
+    h += '<tr class="' + (bad && bad.indexOf(i) >= 0 ? 'bad' : '') + '">' +
+      (p.xs ? '<td class="fx">' + esc(r[0]) + '</td>' : '<td><input type="text" class="ans" data-r="' + i + '" data-c="0" value="' + esc(r[0]) + '" placeholder="' + esc(xv) + '" autocomplete="off" autocapitalize="off" spellcheck="false"></td>') +
+      '<td><input type="text" class="ans" data-r="' + i + '" data-c="1" value="' + esc(r[1]) + '" placeholder="' + esc(yv) + '" autocomplete="off" autocapitalize="off" spellcheck="false"></td></tr>';
+  });
+  h += '</table>';
+  if (!p.xs && rows.length < 6) h += '<button type="button" class="small ghost addrow">+ Add a row</button>';
+  return h;
+}
+function wireTable(q, p, el, changed, bad) {
+  var k = key(q, p);
+  el.innerHTML = tableHtml(p, S.answers[k], bad);
+  var locked = S.results[k] === 'correct' && S.mode !== 'test';
+  el.querySelectorAll('input').forEach(function (inp) {
+    inp.dataset.key = k;
+    if (locked) { inp.readOnly = true; return; }
+    inp.addEventListener('input', function () {
+      var rows = tableRows(p, S.answers[k]); rows[+inp.dataset.r][+inp.dataset.c] = inp.value;
+      var tr = inp.closest('tr'); if (tr) tr.classList.remove('bad');
+      changed({ rows: rows });
+    });
+    inp.addEventListener('keydown', function (e) {
+      S.keys[k] = (S.keys[k] || 0) + 1;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        var all = Array.prototype.slice.call(el.querySelectorAll('input')), i = all.indexOf(inp);
+        if (i < all.length - 1) all[i + 1].focus(); else if (S.mode !== 'test') check(q.id, p.id);
+      }
+    });
+  });
+  var add = el.querySelector('.addrow');
+  if (add) { if (locked) add.style.display = 'none'; add.onclick = function () { var rows = tableRows(p, S.answers[k]); rows.push(['', '']); S.answers[k] = { rows: rows }; S.dirty = true; localSave(); wireTable(q, p, el, changed); var ins = el.querySelectorAll('input'); ins[ins.length - 2].focus(); }; }
+  Tools.refreshInputs();
+}
+function tableFilled(v) { return !!(v && v.rows && v.rows.some(function (r) { return String(r[1] || '').trim(); })); }
 function clearFb(id) { var fb = document.getElementById('fb_' + id); if (fb && !fb.classList.contains('correct')) { fb.className = 'fb'; fb.textContent = ''; } }
 
 function observeShown() {
@@ -2549,7 +2661,7 @@ function observeShown() {
 
 function updateProgress() {
   var total = 0, done = 0;
-  S.A.questions.forEach(function (q) { q.parts.forEach(function (p) { total++; var v = S.answers[key(q, p)]; if (v && (typeof v === 'string' ? v.trim() : (v.points && v.points.length))) done++; }); });
+  S.A.questions.forEach(function (q) { q.parts.forEach(function (p) { total++; var v = S.answers[key(q, p)]; if (v && (typeof v === 'string' ? v.trim() : ((v.points && v.points.length) || tableFilled(v)))) done++; }); });
   var el = document.getElementById('progress'); if (el) el.textContent = done + ' of ' + total + ' answer boxes filled';
   return { total: total, done: done };
 }
@@ -2564,7 +2676,7 @@ function check(qid, pid) {
   var q = S.A.questions.filter(function (x) { return x.id === qid; })[0], p = q.parts.filter(function (x) { return x.id === pid; })[0];
   var k = qid + '.' + pid, id = 'p_' + k.replace(/\W/g, '_'), resp = S.answers[k];
   var fb = document.getElementById('fb_' + id), btn = document.getElementById('chk_' + id);
-  if (resp === undefined || resp === '' || (resp && resp.points && !resp.points.length)) { fb.className = 'fb invalid'; fb.textContent = 'Enter an answer first.'; return; }
+  if (resp === undefined || resp === '' || (resp && resp.points && !resp.points.length) || (resp && resp.rows && !tableFilled(resp))) { fb.className = 'fb invalid'; fb.textContent = 'Enter an answer first.'; return; }
   btn.disabled = true; fb.className = 'fb invalid'; fb.textContent = 'Checking…';
   var meta = { msSinceShown: S.shownAt[qid] ? Date.now() - S.shownAt[qid] : 99999, keys: S.keys[k] || 0 };
   call('api_check', S.aid, qid, pid, resp, meta).then(function (r) {
@@ -2576,8 +2688,14 @@ function check(qid, pid) {
     if (r.status === 'correct') {
       var el = document.getElementById(id); if (el && el.tagName === 'INPUT') el.readOnly = true;
       if (S.plotters[k]) S.plotters[k].disable();
+      if (p.type === 'table') document.querySelectorAll('#' + id + ' input').forEach(function (x) { x.readOnly = true; });
+      if (p.type === 'table') { var ar = document.querySelector('#' + id + ' .addrow'); if (ar) ar.style.display = 'none'; }
     } else btn.disabled = r.status === 'limit' || r.checksLeft === 0;
     if (r.status === 'limit') S.checks[k] = S.checksPerPart;
+    if (p.type === 'table' && r.rows) {
+      var trs = document.querySelectorAll('#' + id + ' table.xy tr');
+      r.rows.forEach(function (i) { if (trs[i + 1]) trs[i + 1].classList.add('bad'); });
+    }
     if (r.status === 'incorrect') checkSteps(qid, 'check');
     updateSolutionRow(qid);
   }).catch(function (e) { btn.disabled = false; fb.className = 'fb invalid'; fb.textContent = 'Could not check right now. Your answer is saved. Try again in a moment.'; });
@@ -2644,7 +2762,8 @@ function closeModal() { document.getElementById('modalBg').style.display = 'none
 
 // ---------------- on-screen work ----------------
 S.stepNote = {};
-function workLines(qid) { var w = S.answers[qid + '.__work']; return Array.isArray(w) && w.length ? w : ['']; }
+function qById(qid) { return S.A.questions.filter(function (x) { return x.id === qid; })[0] || {}; }
+function workLines(qid) { var w = S.answers[qid + '.__work']; return Array.isArray(w) && w.length ? w : [qById(qid).start || '']; }
 function toggleWork(qid) {
   var box = document.getElementById('work_' + qid);
   var show = box.style.display === 'none';
@@ -2653,17 +2772,18 @@ function toggleWork(qid) {
 }
 function renderWork(qid, marks) {
   var box = document.getElementById('work_' + qid); if (!box) return;
-  var lines = workLines(qid), h = '';
+  var lines = workLines(qid), h = '<div class="muted" style="margin-bottom:4px">One step per line. Each new line is the equation after one move (add, subtract, multiply, divide, or substitute).</div>';
   lines.forEach(function (ln, i) {
     var m = marks && marks[i];
-    h += '<div class="wl ' + (m ? m.status : '') + '"><span class="n">' + (i + 1) + '</span><input type="text" class="ans" data-key="' + esc(qid) + '.__work" data-i="' + i + '" value="' + esc(ln) + '" placeholder="' + (i ? 'Next step' : 'Start with the equation or expression from the problem') + '" autocomplete="off" spellcheck="false">' +
+    if (i) h += '<div class="arrow">↓</div>';
+    h += '<div class="wl ' + (m ? m.status : '') + '"><span class="n">Step ' + (i + 1) + '</span><input type="text" class="ans" data-key="' + esc(qid) + '.__work" data-i="' + i + '" value="' + esc(ln) + '" placeholder="' + (i ? 'Next step' : 'Start with the equation or expression from the problem') + '" autocomplete="off" spellcheck="false">' +
       '<span class="mark">' + (m && m.status === 'ok' ? '<span style="color:var(--good)">✓</span>' : m && m.status === 'bad' ? '<span style="color:#c0392b">✗</span>' : '') + '</span>' +
       '<button type="button" class="small ghost" title="Delete this step" onclick="delStep(\'' + esc(qid) + '\',' + i + ')">✕</button></div>' +
       (m && m.status === 'bad' ? '<div class="wmsg">' + esc(m.msg) + '</div>' : '');
   });
   h += '<div class="row" style="margin-top:4px"><button type="button" class="small primary" onclick="addStep(\'' + esc(qid) + '\')">+ Add step</button>' +
     (S.mode !== 'test' ? '<button type="button" class="small" onclick="checkSteps(\'' + esc(qid) + '\', \'button\')">Check my steps</button>' : '') +
-    '<span class="muted">Add step copies your last line so you can rewrite the next version.</span></div>';
+    '<span class="muted">Add step copies your last line so you can rewrite it with one change. In practice mode each step is checked against the one before it.</span></div>';
   box.innerHTML = h;
   box.querySelectorAll('input').forEach(function (inp) {
     inp.addEventListener('input', function () {
@@ -2677,8 +2797,14 @@ function renderWork(qid, marks) {
 function addStep(qid) {
   var arr = workLines(qid).slice();
   if (arr.length >= 40) { toast('That is the most steps one problem can hold.'); return; }
+  var marks = null;
+  if (S.mode !== 'test' && arr.length > 1) {
+    marks = AStep.analyze(arr);
+    if (marks[marks.length - 1].status === 'bad') { renderWork(qid, marks); var bi = document.querySelectorAll('#work_' + qid + ' input'); if (bi.length) bi[bi.length - 1].focus(); return; }
+  }
   arr.push(arr[arr.length - 1] || ''); S.answers[qid + '.__work'] = arr; S.dirty = true; localSave();
-  renderWork(qid);
+  if (marks) marks.push({ status: '' });
+  renderWork(qid, marks);
   var ins = document.querySelectorAll('#work_' + qid + ' input'), last = ins[ins.length - 1];
   if (last) { last.focus(); last.setSelectionRange(last.value.length, last.value.length); }
 }
