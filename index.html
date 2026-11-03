@@ -612,6 +612,23 @@ var Grader = (function () {
     return res('incorrect', cm || 'Not that one. Use the hint button if you are stuck.');
   }
 
+  /** Line, ray, or segment, from the domain. A vertical line is always a line. */
+  function expectedShape(part, eq) {
+    var d = part.domain;
+    if (!d || (d.lo == null && d.hi == null)) return 'line';
+    if (eq && Math.abs(eq.coef.y || 0) < 1e-12) return 'line';
+    if (d.lo != null && d.hi != null) return 'segment';
+    return d.lo != null ? 'ray-right' : 'ray-left';
+  }
+  function shapeMsg(want, got) {
+    var ray = /^ray/.test(want), gotRay = /^ray/.test(got);
+    if (want === 'line') return 'Your points are right. Look at the domain: are there any limits on x? If not, the graph keeps going in both directions.';
+    if (want === 'segment') return 'Your points are right. The domain limits x on both sides, so the graph has two endpoints and stops at each one.';
+    if (ray && gotRay) return 'Right idea, a ray. Check the direction: does the domain allow x-values bigger or smaller than the endpoint?';
+    if (ray && got === 'line') return 'Your points are right, but the domain limits x on one side. The graph starts at an endpoint and goes on in one direction only.';
+    return 'Your points are right, but the domain limits x on one side only. The graph has one endpoint and keeps going the other way.';
+  }
+
   function gradeGraph(part, resp) {
     var pts = (resp && resp.points) || [];
     if (!pts.length) return res('invalid', FORMAT_MSG.graph);
@@ -633,10 +650,12 @@ var Grader = (function () {
     }
     // line mode
     var eq = lineFromString(part.line);
+    var want = expectedShape(part, eq), shape = resp && resp.shape;
     var distinct = [];
     pts.forEach(function (p) { if (!hasPoint(distinct, p, 1e-9, 1e-9)) distinct.push(p); });
     var minPts = part.minPoints || 3;
     if (distinct.length < minPts) return res('invalid', 'Plot at least ' + minPts + ' points. Two points make the line. The third checks your work. You have ' + distinct.length + '.');
+    if (!shape) return res('invalid', 'Choose what your graph is: a line, a ray, or a segment.');
     var off = distinct.filter(function (p) { return !onLine(eq, p); });
     if (!off.length) {
       if (part.domain) {
@@ -653,6 +672,7 @@ var Grader = (function () {
         var miss = part.mustInclude.filter(function (q) { return !hasPoint(distinct, q, 1e-9, 1e-9); });
         if (miss.length) return res('incorrect', 'Right line. This problem also asks you to mark where the line crosses the axes. Plot those points too.');
       }
+      if (shape !== want) return res('incorrect', shapeMsg(want, shape));
       return res('correct');
     }
     // diagnose using first two plotted points
@@ -707,7 +727,7 @@ var Grader = (function () {
         var sample;
         if (p.type === 'graph') {
           if (p.mode === 'points') sample = { points: p.answer };
-          else sample = { points: p.samplePoints || p.mustInclude || [] };
+          else sample = { points: p.samplePoints || p.mustInclude || [], shape: expectedShape(p, lineFromString(p.line)) };
           if (!sample.points.length) return;
         } else if (p.type === 'solutions') {
           if (!p.sample) return; sample = p.sample;
@@ -725,7 +745,7 @@ var Grader = (function () {
   return {
     norm: norm, parseNumber: parseNumber, parseLinearEquation: parseLinearEquation,
     parseInterval: parseInterval, parsePairs: parsePairs, parseSet: parseSet,
-    grade: grade, selfTest: selfTest, FORMAT_MSG: FORMAT_MSG
+    grade: grade, selfTest: selfTest, expectedShape: function (p) { return expectedShape(p, p.line ? lineFromString(p.line) : null); }, FORMAT_MSG: FORMAT_MSG
   };
 })();
 
@@ -849,7 +869,7 @@ function stripRuntime_(a) {
 }
 
 /** Strip everything a student must not see: answers, hints, mistake messages, sample answers. */
-var SAFE_PART_KEYS = ['id', 'label', 'type', 'options', 'grid', 'mode', 'extent', 'domain', 'vars', 'count', 'rows', 'xs', 'xvar', 'yvar', 'minPoints'];
+var SAFE_PART_KEYS = ['id', 'label', 'type', 'options', 'grid', 'mode', 'domain', 'vars', 'count', 'rows', 'xs', 'xvar', 'yvar', 'minPoints'];
 function studentView_(a) {
   return {
     id: a.id, section: a.section, title: a.title, pages: a.pages, course: a.course, mode: a.mode,
@@ -1746,6 +1766,22 @@ var AGraph = (function () {
     var layer = el('g', {}, svg);
     return { svg: svg, X: X, Y: Y, inv: inv, layer: layer, grid: g, el: el, box: { x0: PADL, y0: PADT, x1: PADL + pw, y1: PADT + ph } };
   }
+  /** Ends of the line through p1, p2 clipped to the grid, sorted left to right (bottom to top if vertical). */
+  function clipEnds(g, p1, p2) {
+    var dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+    if (Math.abs(dx) < 1e-12) return [[p1[0], g.ymin], [p1[0], g.ymax]];
+    var m = dy / dx, pts = [];
+    [g.xmin, g.xmax].forEach(function (x) { var y = p1[1] + m * (x - p1[0]); if (y >= g.ymin - 1e-9 && y <= g.ymax + 1e-9) pts.push([x, y]); });
+    if (Math.abs(m) > 1e-12) [g.ymin, g.ymax].forEach(function (y) { var x = p1[0] + (y - p1[1]) / m; if (x >= g.xmin - 1e-9 && x <= g.xmax + 1e-9) pts.push([x, y]); });
+    pts.sort(function (u, v) { return u[0] - v[0]; });
+    return pts.length >= 2 ? [pts[0], pts[pts.length - 1]] : null;
+  }
+  function arrowDefs(svg) {
+    if (svg.querySelector('#ah')) return;
+    var defs = el('defs', {}, svg), mk = el('marker', { id: 'ah', viewBox: '0 0 10 10', refX: 7, refY: 5, markerWidth: 5, markerHeight: 5, orient: 'auto-start-reverse' }, defs);
+    el('path', { d: 'M0,0 L10,5 L0,10 z', fill: '#2b6cb0' }, mk);
+  }
+  var SHAPES = [['line', '↔ Line'], ['ray-right', '●→ Ray going right'], ['ray-left', '←● Ray going left'], ['segment', '●–● Segment']];
   /** Draw a full line through two points, clipped to the grid. */
   function lineThrough(G, p1, p2, color, width, parent) {
     var g = G.grid, dx = p2[0] - p1[0], dy = p2[1] - p1[1], a, b;
@@ -1785,23 +1821,39 @@ var AGraph = (function () {
   /** Interactive plotting. part: {mode, grid, extent}. state: {points:[]}. onChange(state). */
   function plotter(container, part, state, onChange, readOnly) {
     var G = create(container, part.grid), g = part.grid, pts = (state && state.points) ? state.points.slice() : [], sel = pts.length - 1;
+    var shape = (state && state.shape) || '';
     var drawn = G.el('g', {}, G.svg);
+    if (part.mode === 'line') arrowDefs(G.svg);
+    function seg(a, b, arrowA, arrowB) {
+      var at = { x1: G.X(a[0]), y1: G.Y(a[1]), x2: G.X(b[0]), y2: G.Y(b[1]), stroke: '#2b6cb0', 'stroke-width': 3, 'stroke-linecap': 'round' };
+      if (arrowA) at['marker-start'] = 'url(#ah)';
+      if (arrowB) at['marker-end'] = 'url(#ah)';
+      G.el('line', at, drawn);
+    }
     function snap(v, min, step) { return r6(Math.round((v - min) / step) * step + min); }
     function draw() {
       while (drawn.firstChild) drawn.removeChild(drawn.firstChild);
       if (part.mode === 'line' && pts.length >= 2) {
         var sorted = pts.slice().sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
         var first = sorted[0], last = sorted[sorted.length - 1];
-        if (part.extent === 'restricted') {
-          G.el('line', { x1: G.X(first[0]), y1: G.Y(first[1]), x2: G.X(last[0]), y2: G.Y(last[1]), stroke: '#2b6cb0', 'stroke-width': 3, 'stroke-linecap': 'round' }, drawn);
-        } else lineThrough(G, first, last, '#2b6cb0', 3, drawn);
+        var ends = clipEnds(g, first, last);
+        var vertical = Math.abs(last[0] - first[0]) < 1e-12;
+        if (!shape) {
+          // No shape picked yet: a light dashed guide through the points.
+          if (ends) G.el('line', { x1: G.X(ends[0][0]), y1: G.Y(ends[0][1]), x2: G.X(ends[1][0]), y2: G.Y(ends[1][1]), stroke: '#9fb6d8', 'stroke-width': 2, 'stroke-dasharray': '6 5' }, drawn);
+        } else if (shape === 'segment') seg(first, last, false, false);
+        else if (shape === 'ray-right' && ends && !vertical) seg(first, ends[1], false, true);
+        else if (shape === 'ray-left' && ends && !vertical) seg(last, ends[0], false, true);
+        else if (ends) seg(ends[0], ends[1], true, true);
       }
       pts.forEach(function (p, i) {
         G.el('circle', { cx: G.X(p[0]), cy: G.Y(p[1]), r: i === sel ? 7 : 5.5, fill: i === sel ? '#E8A33D' : '#1E2761', stroke: '#fff', 'stroke-width': 1.5 }, drawn);
       });
       if (readout) readout.textContent = pts.length ? (sel >= 0 && pts[sel] ? 'Selected point: (' + pts[sel][0] + ', ' + pts[sel][1] + ')' : '') + '   Points: ' + pts.length : 'Tap the grid to plot a point. Tap a point again to remove it.';
     }
-    function emit() { draw(); onChange && onChange({ points: pts.slice() }); }
+    function emit() { draw(); var st = { points: pts.slice() }; if (part.mode === 'line') st.shape = shape; onChange && onChange(st); }
+    var chips = null;
+    function paintChips() { if (chips) chips.querySelectorAll('button').forEach(function (b) { b.classList.toggle('sel', b.dataset.v === shape); }); }
     var readout = null, tools = null;
     if (!readOnly) {
       G.svg.addEventListener('pointerdown', function (ev) {
@@ -1827,9 +1879,20 @@ var AGraph = (function () {
       clr.onclick = function () { pts = []; sel = -1; emit(); };
       tools.appendChild(undo); tools.appendChild(clr); tools.appendChild(readout);
       container.appendChild(tools);
+      if (part.mode === 'line') {
+        var lab = document.createElement('div'); lab.className = 'plabel'; lab.style.marginTop = '4px'; lab.textContent = 'My graph is a:';
+        chips = document.createElement('div'); chips.className = 'chips';
+        SHAPES.forEach(function (sh) {
+          var bt = document.createElement('button'); bt.type = 'button'; bt.dataset.v = sh[0]; bt.textContent = sh[1];
+          bt.onclick = function () { shape = sh[0]; paintChips(); emit(); };
+          chips.appendChild(bt);
+        });
+        container.appendChild(lab); container.appendChild(chips); paintChips();
+      }
     }
     draw();
-    return { set: function (s) { pts = (s && s.points) ? s.points.slice() : []; sel = pts.length - 1; draw(); }, disable: function () { G.svg.style.pointerEvents = 'none'; if (tools) tools.style.display = 'none'; } };
+    return { set: function (s) { pts = (s && s.points) ? s.points.slice() : []; shape = (s && s.shape) || ''; sel = pts.length - 1; paintChips(); draw(); },
+      disable: function () { G.svg.style.pointerEvents = 'none'; if (tools) tools.style.display = 'none'; if (chips) chips.querySelectorAll('button').forEach(function (b) { b.disabled = true; }); } };
   }
   return { create: create, figure: figure, plotter: plotter, lineThrough: lineThrough };
 })();
@@ -2595,7 +2658,7 @@ function partHtml(q, p) {
   } else if (p.type === 'graph') {
     h += '<div id="' + id + '"></div>';
     if (p.mode === 'points' && p.pointCount) h += '<div class="muted">Plot ' + p.pointCount + ' point' + (p.pointCount > 1 ? 's' : '') + '.</div>';
-    if (p.mode === 'line') h += '<div class="muted">' + ((p.minPoints || 3) > 2 ? 'Plot at least 3 points. Two points make the line. The third one checks your work.' : 'Plot at least 2 points. The tool connects them.') + '</div>';
+    if (p.mode === 'line') h += '<div class="muted">' + ((p.minPoints || 3) > 2 ? 'Plot at least 3 points. Two points make the line. The third one checks your work. Then choose line, ray, or segment.' : 'Plot at least 2 points. Then choose line, ray, or segment.') + '</div>';
   } else if (p.type === 'table') {
     h += '<div id="' + id + '">' + tableHtml(p, val) + '</div>';
     h += '<div class="muted">' + (p.xs ? 'Find the y-value for each x-value.' : 'Pick at least ' + p.rows + ' x-values. Find the y-value for each one. Easy x-values like -1, 0, and 1 work well.') + '</div>';
