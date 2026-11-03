@@ -1522,6 +1522,23 @@ function t_skyward(aid, scoreMode) {
     return { ok: true };
   };
 
+  /** Redo: allowed on practice assignments unless the teacher turned it off; never on tests unless turned on. */
+  function redoAllowed(aid) {
+    var c = (window.AC_CONFIG.assignments || {})[aid] || {};
+    return c.redo !== undefined ? !!c.redo : (c.mode || 'practice') !== 'test';
+  }
+  function tries(aid) { return (lsGet('tries', {}) || {})[aid] || 1; }
+  window.api_redo = function (aid) {
+    if (!redoAllowed(aid)) throw new Error('Your teacher has not turned on redo for this assignment.');
+    var att = getAttempt_(STUDENT_EMAIL, aid), subs = Db.read('Submissions').filter(function (s) { return s.Assignment === aid; });
+    if (!subs.length) throw new Error('Submit this assignment before you redo it.');
+    // Keep a copy of the submitted attempt on this device, then start clean.
+    var hist = lsGet('history', []); hist.push({ a: aid, try: tries(aid), sub: subs[subs.length - 1], state: att ? att.state : null }); lsSet('history', hist.slice(-30));
+    ['Attempts', 'Submissions', 'Events'].forEach(function (t) { lsSet('t_' + t, lsGet('t_' + t, []).filter(function (r) { return r.Assignment !== aid; })); });
+    var tr = lsGet('tries', {}) || {}; tr[aid] = tries(aid) + 1; lsSet('tries', tr);
+    return { ok: true, attempt: tr[aid] };
+  };
+
   /** Sealed receipt: compressed, encrypted to the teacher's public key, split into Form-sized parts. */
   window.api_receipt = async function (aid) {
     var att = getAttempt_(STUDENT_EMAIL, aid), prof = lsGet('profile', {}) || {};
@@ -1530,7 +1547,7 @@ function t_skyward(aid, scoreMode) {
     var events = Db.read('Events').filter(function (e) { return e.Assignment === aid; }).slice(-40).map(function (e) { return [String(e.Time).slice(5, 16), e.Type, String(e.Detail).slice(0, 40)]; });
     var st = att.state, rid = (await sha256hex(DEVICE + aid + (sub ? sub.Submitted : '') + st.started)).slice(0, 8);
     var payload = { v: 1, rid: rid, a: aid, n: prof.name || '', p: prof.period || '', dev: DEVICE, t0: st.started, t1: sub ? sub.Submitted : new Date().toISOString(),
-      status: att.status, ans: st.answers, h: st.hints, c: st.checks, r: Object.keys(st.revealed || {}), I: st.integrity, ev: events };
+      try: tries(aid), status: att.status, ans: st.answers, h: st.hints, c: st.checks, r: Object.keys(st.revealed || {}), I: st.integrity, ev: events };
     var MAXP = 3, LIM = 3900, parts;
     for (var attempt = 0; attempt < 3; attempt++) {
       if (attempt === 1) payload.ev = payload.ev.slice(-10);
@@ -1543,7 +1560,7 @@ function t_skyward(aid, scoreMode) {
     }
     var n = parts.length;
     parts = parts.map(function (p, i) { return 'AC1.' + rid + '.' + (i + 1) + 'of' + n + '.' + p; });
-    return { parts: parts, rid: rid, name: prof.name || '', period: prof.period || '', formUrl: window.AC_CONFIG.formUrl || '', tooLong: parts.length > MAXP };
+    return { parts: parts, rid: rid, name: prof.name || '', period: prof.period || '', formUrl: window.AC_CONFIG.formUrl || '', tooLong: parts.length > MAXP, attempt: tries(aid), redo: redoAllowed(aid) };
   };
   async function seal(text) {
     var gz = await streamBytes(new TextEncoder().encode(text), new CompressionStream('gzip'));
@@ -2981,6 +2998,9 @@ function renderSend(rc) {
     }).join('') + '</details>' +
     (rc.tooLong ? '<p class="err">Your receipt is very long. Copy every part.</p>' : '') +
     '<p class="muted" style="margin-top:8px">You can come back to this assignment and press View to send it again.</p>';
+  if (rc.redo) h += '<div style="margin-top:12px;padding-top:10px;border-top:1px dashed #c9d2e6"><b>Want to try it again?</b>' + (rc.attempt > 1 ? ' <span class="tag">Try ' + rc.attempt + '</span>' : '') +
+    '<p class="muted">Redo clears your answers and starts this assignment over. Send this receipt first so your teacher has it.</p>' +
+    '<button type="button" onclick="askRedo()">↺ Redo assignment</button></div>';
   box.innerHTML = h;
 }
 function copyPart(i) {
@@ -2996,6 +3016,20 @@ function fallbackCopy(t) {
   try { document.execCommand('copy'); } catch (e) {}
   window.__allowCopy = false;
   ta.remove();
+}
+
+function askRedo() {
+  modal('<h2>Redo this assignment?</h2><p>All of your answers, checks, hints, and work steps for this assignment will be cleared. You start over from question 1.</p>' +
+    '<p><b>Did you send this receipt to your teacher?</b> If not, go back and press <b>Send to my teacher</b> first. Once you redo, this receipt is gone from the page.</p>' +
+    '<div class="row"><button type="button" onclick="closeModal()">Go back</button><button type="button" class="primary" onclick="doRedo()">Yes, start over</button></div>');
+}
+function doRedo() {
+  var aid = S.aid;
+  call('api_redo', aid).then(function (r) {
+    try { localStorage.removeItem(LOCAL + aid); } catch (e) {}
+    closeModal(); toast('Starting over. This is try ' + r.attempt + '.', 3000);
+    openAssignment(aid);
+  }).catch(function (e) { closeModal(); toast(e.message || String(e)); });
 }
 
 Tools.init();
