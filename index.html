@@ -1871,7 +1871,7 @@ var AStep = (function () {
     if (!vs.length) {
       var vals = segs.map(num); if (vals.some(function (v) { return v === null; })) return null;
       var ok = vals.every(function (v) { return near(v, vals[0]); });
-      return { kind: segs.length > 1 && !cont ? 'claim' : 'num', value: vals[vals.length - 1], first: vals[0], ok: ok, chain: segs.length > 1 };
+      return { kind: segs.length > 1 && !cont ? 'claim' : 'num', value: vals[vals.length - 1], first: vals[0], vals: vals, ok: ok, chain: segs.length > 1 };
     }
     // Assignment: m = (numbers) = (numbers)
     if (segs.length >= 2 && /^[a-z]$/i.test(segs[0]) && varsIn(segs.slice(1).join(' ')).length === 0) {
@@ -1908,6 +1908,9 @@ var AStep = (function () {
   }
   function follows(prev, cur) {
     if (!prev || !cur) return null;
+    // Checking a solution: "4 + 2(-1/2) = 5" then "3 = 5". Each side must simplify on its own.
+    if (prev.isTest && cur.kind === 'claim' && cur.vals.length === 2)
+      return near(cur.vals[0], prev.vals[0]) && near(cur.vals[1], prev.vals[1]);
     if (cur.kind === 'num' && prev.kind === 'num' && (!cur.name || !prev.name || cur.name === prev.name)) return near(cur.first, prev.value);
     if (cur.kind === 'eq1' && prev.kind === 'eq1' && cur.v === prev.v) return near(cur.root, prev.root);
     // "x = 3" after an equation in x, or an equation in x after "x = 3"
@@ -1929,12 +1932,16 @@ var AStep = (function () {
       for (var k = 0; k < pieces.length; k++) {
         var c = classify(pieces[k]);
         if (!c) continue;
-        if ((c.kind === 'claim' || c.kind === 'num') && c.ok === false) {
+        // A two-sided number line that is false is a test (substituting to check a solution), not a mistake.
+        var isTest = c.kind === 'claim' && c.vals.length === 2 && c.ok === false && !!prev && (prev.kind === 'eq1' || prev.kind === 'eq2' || prev.isTest);
+        if (isTest) c.isTest = true;
+        if ((c.kind === 'claim' || c.kind === 'num') && c.ok === false && !isTest) {
           st = { status: 'bad', msg: 'This line is not true. Recheck the arithmetic here.' }; break;
         }
         var fl = follows(prev, c);
-        if (fl === false) { st = { status: 'bad', msg: 'Something changed here that should not have. Compare this line with the one above it.' }; break; }
-        if (fl === true || c.kind === 'claim' || c.chain) st = { status: 'ok' };
+        if (fl === false) { st = { status: 'bad', msg: isTest || (prev && prev.kind === 'claim') ? 'Simplify each side on its own. One side does not match the line above.' : 'Something changed here that should not have. Compare this line with the one above it.' }; break; }
+        if (isTest) st = { status: fl === true ? 'ok' : 'none' };
+        else if (fl === true || c.kind === 'claim' || c.chain) st = { status: 'ok' };
         prev = c;
       }
       if (st.status === 'bad') found = true;
@@ -2128,7 +2135,7 @@ var Tools = (function () {
     ['7'], ['8'], ['9'], ['/', 'op'], ['(', 'op'], [')', 'op'], ['x', 'op'], ['y', 'op'],
     ['4'], ['5'], ['6'], ['−', 'op', '-'], ['+', 'op'], ['=', 'op'], ['≤', 'op'], ['≥', 'op'],
     ['1'], ['2'], ['3'], ['.'], [',', 'op'], ['( , )', 'op', '(,)'], ['<', 'op'], ['>', 'op'],
-    ['0'], ['␣', 'op', ' '], ['◀', 'act', 'left'], ['▶', 'act', 'right'], ['⌫', 'act', 'back'], ['Clear', 'act', 'clear'], ['Done', 'act', 'done']
+    ['0'], ['·', 'op'], ['≠', 'op'], ['◀', 'act', 'left'], ['▶', 'act', 'right'], ['⌫', 'act', 'back'], ['Clear', 'act', 'clear'], ['Done', 'act', 'done']
   ];
   function targetOk(el) { return el && (el.classList.contains('ans') || el.classList.contains('ans-like')); }
   document.addEventListener('focusin', function (e) { if (targetOk(e.target)) active = e.target; });
@@ -2331,6 +2338,13 @@ function blockPaste(e) {
   toast('Pasting is turned off. Type your own answer.');
 }
 document.addEventListener('paste', blockPaste, true);
+// Algebra notation: show * as a raised dot (·) as students type. Graders read both.
+document.addEventListener('input', function (e) {
+  var el = e.target;
+  if (!el || el.tagName !== 'INPUT' || !el.classList.contains('ans') || el.value.indexOf('*') < 0) return;
+  var pos = el.selectionStart; el.value = el.value.replace(/\*/g, '·');
+  try { el.setSelectionRange(pos, pos); } catch (x) {}
+}, true);
 document.addEventListener('drop', function (e) { e.preventDefault(); }, true);
 document.addEventListener('copy', function (e) { if (window.__allowCopy) return; e.preventDefault(); S.events.push({ type: 'copy' }); }, true);
 document.addEventListener('cut', function (e) { e.preventDefault(); }, true);
