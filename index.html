@@ -940,6 +940,8 @@ function applyEvents_(email, a, st, events, cfg) {
       if (counts) { I.leaves++; I.awayMs += ms; logEvent_(email, a.id, 'left page', Math.round(ms / 1000) + ' s' + (ev.reason ? ' (' + ev.reason + ')' : '')); }
     } else if (ev.type === 'paste') { I.pastes++; logEvent_(email, a.id, 'paste blocked', ev.where || ''); }
     else if (ev.type === 'copy') { I.copies++; }
+    else if (ev.type === 'inject') { I.injected = (I.injected || 0) + 1; logEvent_(email, a.id, 'page changed by an extension', String(ev.where || '').slice(0, 60)); }
+    else if (ev.type === 'autofill') { I.noTyping = (I.noTyping || 0) + 1; logEvent_(email, a.id, 'answer filled in without typing', String(ev.where || '').slice(0, 60)); }
   });
   return a.mode === 'test' && st.integrity.leaves >= lockAfter;
 }
@@ -1022,6 +1024,7 @@ function api_check(aid, qid, pid, response, meta) {
     }
     st.checks[key] = (st.checks[key] || 0) + 1;
     st.results[key] = r.status;
+    if (r.status === 'correct') { st.correctAt = st.correctAt || {}; st.correctAt[key] = new Date().toISOString(); }
     st.attempted[qid] = true;
     if (r.status === 'correct' && meta && +meta.msSinceShown < 8000 && +meta.keys < 2 &&
         ['number', 'equation', 'inequality', 'pair', 'set', 'solutions'].indexOf(f.p.type) >= 0) {
@@ -1116,6 +1119,9 @@ function api_solution(aid, qid, answers) {
     // Save what is on screen for this problem before freezing it.
     Object.keys(answers || {}).forEach(function (k) { if (k.split('.')[0] === qid) st.answers[k] = answers[k]; });
     st.revealed[qid] = new Date().toISOString();
+    // Snapshot of this problem's answers at the moment the solution opened, so the teacher can see what changed after.
+    st.beforeSol = st.beforeSol || {};
+    q.parts.forEach(function (p) { var k = qid + '.' + p.id; st.beforeSol[k] = st.answers[k] === undefined ? null : st.answers[k]; });
     st.integrity.solutions = (st.integrity.solutions || 0) + 1;
     putAttempt_(email, aid, att.status, st, att.row);
     logEvent_(email, aid, 'viewed full solution', q.label);
@@ -1186,7 +1192,7 @@ function api_submit(aid, answers, events) {
     var sc = scoreAttempt_(a, st);
     var I = st.integrity;
     var hintsUsed = Object.keys(st.hints).reduce(function (s, k) { return s + st.hints[k]; }, 0);
-    var eligible = I.pastes === 0 && I.leaves <= cfg.bonusMaxLeaves && I.lockouts === 0 && !(I.solutions > 0);
+    var eligible = I.pastes === 0 && !(I.noTyping > 0) && I.leaves <= cfg.bonusMaxLeaves && I.lockouts === 0 && !(I.solutions > 0);
     var pct = sc.max ? sc.auto / sc.max * 100 : 0;
     var stu = student_(email) || {};
     Db.append('Submissions', {
@@ -1567,7 +1573,7 @@ function t_skyward(aid, scoreMode) {
     var events = Db.read('Events').filter(function (e) { return e.Assignment === aid; }).slice(-40).map(function (e) { return [String(e.Time).slice(5, 16), e.Type, String(e.Detail).slice(0, 40)]; });
     var st = att.state, rid = (await sha256hex(DEVICE + aid + (sub ? sub.Submitted : '') + st.started)).slice(0, 8);
     var payload = { v: 1, rid: rid, a: aid, n: prof.name || '', p: prof.period || '', dev: DEVICE, t0: st.started, t1: sub ? sub.Submitted : new Date().toISOString(),
-      try: tries(aid), status: att.status, ans: st.answers, h: st.hints, c: st.checks, r: Object.keys(st.revealed || {}), I: st.integrity, ev: events };
+      try: tries(aid), status: att.status, ans: st.answers, h: st.hints, c: st.checks, r: Object.keys(st.revealed || {}), rt: st.revealed || {}, bs: st.beforeSol || {}, ca: st.correctAt || {}, I: st.integrity, ev: events };
     var MAXP = 3, LIM = 3900, parts;
     for (var attempt = 0; attempt < 3; attempt++) {
       if (attempt === 1) payload.ev = payload.ev.slice(-10);
@@ -2056,7 +2062,17 @@ function call(fn) {
   .q { position:relative; }
   .q .qhead { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
   .q .qnum { font-family:Cambria, Caladea, Georgia, serif; font-weight:700; font-size:20px; color:var(--navy); }
-  .q .prompt { margin:4px 0 8px; }
+  .q .prompt { margin:6px 0 14px; font-size:19px; line-height:1.55; color:#141a2e; font-weight:500; background:#f2f5fd; border-left:6px solid var(--navy); border-radius:10px; padding:12px 14px; }
+  .q.cur { box-shadow:0 0 0 3px var(--amber); }
+  .q .readbtn { margin-left:auto; }
+  .q .part .plabel { font-size:15.5px; color:#3a4359; }
+  #view.focus .q:not(.cur), #view.focus .group { display:none; }
+  #view.focus .q.cur { min-height:40vh; }
+  .qnav { display:none; position:sticky; top:54px; z-index:15; background:rgba(247,248,252,.97); padding:6px 0; gap:8px; align-items:center; }
+  #view.focus .qnav { display:flex; }
+  .qnav .where { flex:1; text-align:center; font-weight:700; color:var(--navy); }
+  .qnav select { max-width:170px; }
+  @media (max-width:600px) { .qnav { position:static; } .qnav .grp { display:none; } .qnav select { max-width:84px; } .qnav .where { font-size:15px; } .q .prompt { font-size:18px; } }
   .group { margin:22px 4px 4px; font-size:21px; border-bottom:3px solid var(--amber); padding-bottom:4px; }
   .part { border-top:1px dashed var(--line); padding-top:10px; margin-top:10px; }
   .part:first-of-type { border-top:none; }
@@ -2122,6 +2138,7 @@ function call(fn) {
 <div class="bar">
   <h1 id="barTitle">Algebra Coach</h1>
   <span class="status" id="saveStatus"></span>
+  <button type="button" id="btnFocus" onclick="toggleFocus()" title="Show one question at a time" style="display:none">🎯<span class="lbl"> One at a time</span></button>
   <button type="button" id="btnKeypad" onclick="Tools.toggleKeypad()" title="Show the math keypad">⌨<span class="lbl"> Keypad</span></button>
   <button type="button" id="btnCalc" onclick="Tools.toggleCalc()" title="Calculator">🖩<span class="lbl"> Calculator</span></button>
   <button type="button" id="btnHome" onclick="goHome()">Home</button>
@@ -2212,17 +2229,17 @@ var Tools = (function () {
     var v = el.value, caret;
     if (txt === '(,)') { el.value = v.slice(0, s) + '(, )' + v.slice(e); caret = s + 1; }
     else { el.value = v.slice(0, s) + txt + v.slice(e); caret = s + txt.length; }
-    el.setSelectionRange(caret, caret); el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.setSelectionRange(caret, caret); el.__kpAt = Date.now(); el.dispatchEvent(new Event('input', { bubbles: true }));
   }
   function key(k) {
     var el = active;
     if (k === 'done') { toggleKeypad(false); return; }
     if (!el) { toast('Tap an answer box first.'); return; }
     var s = el.selectionStart || 0, e = el.selectionEnd || 0;
-    if (k === 'back') { if (s === e && s > 0) { el.value = el.value.slice(0, s - 1) + el.value.slice(e); el.setSelectionRange(s - 1, s - 1); } else { el.value = el.value.slice(0, s) + el.value.slice(e); el.setSelectionRange(s, s); } el.dispatchEvent(new Event('input', { bubbles: true })); }
+    if (k === 'back') { if (s === e && s > 0) { el.value = el.value.slice(0, s - 1) + el.value.slice(e); el.setSelectionRange(s - 1, s - 1); } else { el.value = el.value.slice(0, s) + el.value.slice(e); el.setSelectionRange(s, s); } el.__kpAt = Date.now(); el.dispatchEvent(new Event('input', { bubbles: true })); }
     else if (k === 'left') el.setSelectionRange(Math.max(0, s - 1), Math.max(0, s - 1));
     else if (k === 'right') el.setSelectionRange(s + 1, s + 1);
-    else if (k === 'clear') { el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })); }
+    else if (k === 'clear') { el.value = ''; el.__kpAt = Date.now(); el.dispatchEvent(new Event('input', { bubbles: true })); }
     if (el === document.getElementById('calcIn') && k === 'done') return;
   }
   function buildKeys() {
@@ -2466,7 +2483,7 @@ window.addEventListener('beforeunload', function () { if (S.aid) localSave(); })
 function goHome() {
   if (S.aid && S.status === 'active' && S.mode === 'test') { toast('Submit the test before leaving it.'); return; }
   var p = S.aid ? save(true) : Promise.resolve();
-  p.then(function () { S.aid = null; fsWanted = false; Tools.toggleCalc(false); Tools.setMode('basic'); loadHome(); });
+  p.then(function () { document.getElementById('btnFocus').style.display = 'none'; S.aid = null; fsWanted = false; Tools.toggleCalc(false); Tools.setMode('basic'); loadHome(); });
 }
 function loadHome() {
   document.getElementById('barTitle').textContent = 'Algebra Coach';
@@ -2554,7 +2571,8 @@ function render() {
   A.questions.forEach(function (q) {
     if (q.group !== lastGroup) { h += '<h2 class="group">' + esc(q.group) + '</h2>'; lastGroup = q.group; }
     h += '<div class="card q" id="q_' + esc(q.id) + '" data-qid="' + esc(q.id) + '"><div class="qhead"><span class="qnum">' + esc(q.label) + '.</span>' +
-      (q.fromPresentation ? '<span class="tag amber">FROM THE PRESENTATION · ' + esc(q.fromPresentation) + '</span>' : '') + '</div>' +
+      (q.fromPresentation ? '<span class="tag amber">FROM THE PRESENTATION · ' + esc(q.fromPresentation) + '</span>' : '') +
+      ('speechSynthesis' in window ? '<button type="button" class="small ghost readbtn" title="Read the question out loud" onclick="readQ(\'' + esc(q.id) + '\')">🔊 Read to me</button>' : '') + '</div>' +
       '<div class="prompt noselect">' + esc(q.prompt) + '</div>';
     if (q.table) h += '<table class="data noselect">' + q.table.map(function (r) { return '<tr>' + r.map(function (c) { return '<td>' + esc(c) + '</td>'; }).join('') + '</tr>'; }).join('') + '</table>';
     if (q.image) h += '<div class="qimg"><img id="img_' + esc(q.id) + '" alt="' + esc(q.image.alt || 'Picture for this problem') + '"><div class="muted">Tap the picture to enlarge it.</div></div>';
@@ -2573,6 +2591,9 @@ function render() {
       '<div id="sol_' + esc(q.id) + '"></div>';
     h += '</div>';
   });
+  h = h.replace('<div id="leaveBanner"></div><div id="bonusBanner"></div></div>', '<div id="leaveBanner"></div><div id="bonusBanner"></div></div>' +
+    '<div class="qnav"><button type="button" class="small" onclick="moveQ(-1)">◀ Back</button><span class="where" id="qwhere"></span><select id="qjump" onchange="goQ(+this.value)">' +
+    A.questions.map(function (q, i) { return '<option value="' + i + '">' + esc(q.label) + '</option>'; }).join('') + '</select><button type="button" class="small primary" onclick="moveQ(1)">Next ▶</button></div>');
   h += '<div class="submitbar"><span class="muted grow" id="progress"></span><button type="button" class="primary" onclick="confirmSubmit()">Submit ' + (S.mode === 'test' ? 'test' : 'assignment') + '</button></div>';
   v.innerHTML = h;
 
@@ -2587,6 +2608,8 @@ function render() {
     updateSolutionRow(q.id);
   });
   Tools.refreshInputs();
+  document.getElementById('btnFocus').style.display = '';
+  applyFocus();
   observeShown();
   updateProgress();
   updateLeaveBanner();
@@ -2854,6 +2877,99 @@ function showSubmitted(r) {
   v.innerHTML = h;
 }
 
+// ---------------- question focus and read aloud ----------------
+var FOCUS = (function () { try { return localStorage.getItem('ac_focus') === '1'; } catch (e) { return false; } })(), QI = 0;
+function toggleFocus() { FOCUS = !FOCUS; try { localStorage.setItem('ac_focus', FOCUS ? '1' : '0'); } catch (e) {} applyFocus(); }
+function applyFocus() {
+  var v = document.getElementById('view'), b = document.getElementById('btnFocus'); if (!S.A) return;
+  v.classList.toggle('focus', FOCUS);
+  b.classList.toggle('on', FOCUS); b.title = FOCUS ? 'Show every question' : 'Show one question at a time';
+  b.innerHTML = FOCUS ? '📄<span class="lbl"> Show all</span>' : '🎯<span class="lbl"> One at a time</span>';
+  if (FOCUS) goQ(QI, true); else document.querySelectorAll('.q.cur').forEach(function (n) { n.classList.remove('cur'); });
+}
+function goQ(i, quiet) {
+  var qs = S.A.questions; QI = Math.max(0, Math.min(qs.length - 1, i));
+  document.querySelectorAll('.q.cur').forEach(function (n) { n.classList.remove('cur'); });
+  var el = document.getElementById('q_' + qs[QI].id); if (!el) return;
+  el.classList.add('cur');
+  var w = document.getElementById('qwhere'); if (w) w.innerHTML = 'Question ' + (QI + 1) + ' of ' + qs.length + '<span class="grp"> · ' + esc(qs[QI].group) + '</span>';
+  var j = document.getElementById('qjump'); if (j) j.value = String(QI);
+  if (!S.shownAt[qs[QI].id]) S.shownAt[qs[QI].id] = Date.now();
+  if (!quiet) window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+function moveQ(d) { if (S.mode !== 'test') save(); goQ(QI + d); }
+/** Read a question out loud in plain math words. */
+function speakable(t) {
+  return String(t).replace(/(\d)\s*\/\s*(\d)/g, '$1 over $2').replace(/<=|≤/g, ' is less than or equal to ').replace(/>=|≥/g, ' is greater than or equal to ')
+    .replace(/</g, ' is less than ').replace(/>/g, ' is greater than ').replace(/=/g, ' equals ').replace(/(^|[\s(,])-(?=\d|[a-z(])/gi, '$1 negative ')
+    .replace(/(\d|\))\s*-\s*/g, '$1 minus ').replace(/·|\*/g, ' times ').replace(/\^2/g, ' squared ').replace(/\(/g, ', ').replace(/\)/g, ', ');
+}
+function readQ(qid) {
+  var q = S.A.questions.filter(function (x) { return x.id === qid; })[0]; if (!q || !window.speechSynthesis) return;
+  speechSynthesis.cancel();
+  var text = q.prompt + ' ' + q.parts.map(function (p) { return p.label && p.label !== 'Graph' && p.label !== 'Table of values' ? p.label : ''; }).join('. ');
+  var u = new SpeechSynthesisUtterance(speakable(text)); u.rate = 0.92; speechSynthesis.speak(u);
+}
+
+// ---------------- extension signals ----------------
+// 1. Something added to the page that this app did not put there (AI helpers, "solve" buttons, writing tools).
+var EXT_SEEN = {}, EXT_PAT = /grammarly|chrome-extension|moz-extension|copilot|gemini|chatgpt|openai|monica|sider|merlin|maxai|harpa|photomath|mathway|socratic|quillbot|wordtune|brainly|gauth/i;
+var KNOWN_TOP = [];
+function extFlag(sig) {
+  sig = String(sig).slice(0, 60); if (EXT_SEEN[sig] || !S.aid) return; EXT_SEEN[sig] = 1;
+  S.events.push({ type: 'inject', where: sig }); S.dirty = true;
+}
+function nodeSig(n) {
+  var id = n.id ? '#' + n.id : '', cl = typeof n.className === 'string' && n.className ? '.' + n.className.split(/\s+/)[0] : '';
+  return n.tagName.toLowerCase() + id + cl;
+}
+function suspicious(n) {
+  if (!n || n.nodeType !== 1 || n.hasAttribute('data-ac')) return false;
+  var tag = n.tagName.toLowerCase();
+  if (tag.indexOf('-') > 0) return true;                                                    // custom elements: <grammarly-extension>, <sider-...>
+  var src = n.getAttribute('src') || n.getAttribute('href') || '';
+  if (/^(chrome|moz)-extension:/i.test(src)) return true;
+  if (tag === 'iframe' && !(n.closest && n.closest('#modal'))) return true;
+  var attrs = Array.prototype.map.call(n.attributes, function (a) { return a.name + '=' + a.value; }).join(' ');
+  return EXT_PAT.test(attrs) && !/class=(ans|work|chips)/.test(attrs);
+}
+function extScan(root) {
+  (root.querySelectorAll ? [root].concat(Array.prototype.slice.call(root.querySelectorAll('*'))) : []).forEach(function (n) { if (suspicious(n)) extFlag(nodeSig(n)); });
+  ['data-gramm', 'data-gramm_editor', 'data-new-gr-c-s-check-loaded', 'data-gr-ext-installed'].forEach(function (a) { if (document.querySelector('[' + a + ']')) extFlag('attr ' + a); });
+}
+(function () {
+  if (!('MutationObserver' in window)) return;
+  KNOWN_TOP = Array.prototype.slice.call(document.body.children);
+  new MutationObserver(function (muts) {
+    if (!S.aid) return;
+    muts.forEach(function (m) {
+      Array.prototype.forEach.call(m.addedNodes || [], function (n) {
+        if (n.nodeType !== 1) return;
+        if ((m.target === document.body || m.target === document.documentElement) && KNOWN_TOP.indexOf(n) < 0 && !n.hasAttribute('data-ac') && n.tagName !== 'SCRIPT') extFlag('added ' + nodeSig(n));
+        else if (suspicious(n)) extFlag(nodeSig(n));
+      });
+      if (m.type === 'attributes' && /gramm|gr-/.test(m.attributeName || '')) extFlag('attr ' + m.attributeName);
+    });
+  }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-gramm', 'data-gramm_editor', 'data-new-gr-c-s-check-loaded', 'data-gr-ext-installed'] });
+  setInterval(function () { if (S.aid) extScan(document.body); }, 8000);
+})();
+// 2. Text that shows up in an answer box without typing (an extension filling it in).
+var LASTKEY = 0;
+document.addEventListener('keydown', function (e) { LASTKEY = Date.now(); if (e.target) e.target.__keyAt = LASTKEY; }, true);
+document.addEventListener('focusin', function (e) { var el = e.target; if (el && el.classList && el.classList.contains('ans')) el.__len = (el.value || '').length; }, true);
+document.addEventListener('input', function (e) {
+  var el = e.target; if (!el || !el.classList || !el.classList.contains('ans') || !S.aid) return;
+  var len = (el.value || '').length, grew = len - (el.__len || 0); el.__len = len;
+  var kp = el.__kpAt && Date.now() - el.__kpAt < 400, typed = el.__keyAt && Date.now() - el.__keyAt < 1500;
+  if (kp || typed || grew < 3) return;
+  if (!e.isTrusted || e.inputType === 'insertText' || e.inputType === 'insertReplacementText' || !e.inputType) {
+    var k = el.dataset.key || '', now = Date.now();
+    if (S.__autoAt && S.__autoAt[k] && now - S.__autoAt[k] < 10000) return;
+    (S.__autoAt = S.__autoAt || {})[k] = now;
+    S.events.push({ type: 'autofill', where: k + ' (+' + grew + ' chars)' }); S.dirty = true;
+  }
+}, true);
+
 function modal(html) { document.getElementById('modal').innerHTML = html; document.getElementById('modalBg').style.display = 'flex'; }
 function closeModal() { document.getElementById('modalBg').style.display = 'none'; }
 
@@ -3091,7 +3207,7 @@ function copyPart(i) {
 }
 function fallbackCopy(t) {
   // The page blocks copy events for answers; this temporary box is allowed.
-  var ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select();
+  var ta = document.createElement('textarea'); ta.setAttribute('data-ac', '1'); ta.value = t; document.body.appendChild(ta); ta.select();
   window.__allowCopy = true;
   try { document.execCommand('copy'); } catch (e) {}
   window.__allowCopy = false;
