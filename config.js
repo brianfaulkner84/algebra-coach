@@ -42,7 +42,7 @@ window.AC_CONFIG = {
   },
   "ch4-4.6": {
    "status": "open",
-   "mode": "test",
+   "mode": "practice",
    "calculator": "basic",
    "resources": []
   },
