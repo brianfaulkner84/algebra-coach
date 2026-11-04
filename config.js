@@ -14,43 +14,57 @@ window.AC_CONFIG = {
    "status": "open",
    "mode": "practice",
    "calculator": "basic",
-   "resources": []
+   "resources": [],
+   "redo": true,
+   "gpAnswers": true
   },
   "ch4-4.2": {
    "status": "open",
    "mode": "practice",
    "calculator": "basic",
-   "resources": []
+   "resources": [],
+   "redo": true,
+   "gpAnswers": true
   },
   "ch4-4.3": {
    "status": "open",
    "mode": "practice",
    "calculator": "basic",
-   "resources": []
+   "resources": [],
+   "redo": true,
+   "gpAnswers": true
   },
   "ch4-4.4": {
    "status": "open",
    "mode": "practice",
    "calculator": "basic",
-   "resources": []
+   "resources": [],
+   "redo": true,
+   "gpAnswers": true
   },
   "ch4-4.5": {
    "status": "open",
    "mode": "practice",
    "calculator": "basic",
-   "resources": []
+   "resources": [],
+   "redo": true,
+   "gpAnswers": true
   },
   "ch4-4.6": {
    "status": "open",
    "mode": "practice",
    "calculator": "basic",
-   "resources": []
+   "resources": [],
+   "redo": true,
+   "gpAnswers": true
   },
   "ch4-4.7": {
    "status": "open",
    "mode": "practice",
    "calculator": "basic",
-   "resources": []
+   "resources": [],
+   "redo": true,
+   "gpAnswers": true
   }
  },
  "teacherKey": {
