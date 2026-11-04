@@ -1460,8 +1460,32 @@ function t_skyward(aid, scoreMode) {
     var json = new TextDecoder().decode(await streamBytes(plain, new DecompressionStream('gzip')));
     CONTENT = JSON.parse(json);
     window.BUILTIN_IMAGES = CONTENT.images || {};
+    SLIDE_KEY = key;
     return true;
   })();
+  var SLIDE_KEY = null, SLIDE_CACHE = {};
+
+  /** Lesson presentation for an assignment, if the teacher has it turned on. Guided Practice answer slides only when allowed. */
+  function slideCfg(aid) {
+    var c = (window.AC_CONFIG.assignments || {})[aid] || {}, d = CONTENT && CONTENT.slideDecks && CONTENT.slideDecks[aid];
+    if (!d || c.slides === false || (c.mode || 'practice') === 'test') return null;
+    return { n: d.n, titles: d.titles, answers: c.gpAnswers ? [] : d.answers, withAnswers: !!c.gpAnswers };
+  }
+  window.api_slideInfo = function (aid) { var s = slideCfg(aid); return s ? { n: s.n, titles: s.titles, hidden: s.answers } : null; };
+  async function slideFile(name) {
+    if (SLIDE_CACHE[name]) return SLIDE_CACHE[name];
+    var r = await fetch('slides/' + name, { cache: 'force-cache' }); if (!r.ok) throw new Error('The slides could not be loaded.');
+    var raw = new Uint8Array(await r.arrayBuffer());
+    var plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.subarray(0, 12) }, SLIDE_KEY, raw.subarray(12));
+    return (SLIDE_CACHE[name] = JSON.parse(new TextDecoder().decode(plain)).imgs);
+  }
+  window.api_slides = async function (aid) {
+    var s = slideCfg(aid); if (!s) throw new Error('No presentation for this assignment.');
+    var imgs = Object.assign({}, await slideFile(aid + '.bin'));
+    if (s.withAnswers) Object.assign(imgs, await slideFile(aid + '.ans.bin'));
+    var out = []; for (var i = 1; i <= s.n; i++) out.push(imgs[i] ? 'data:image/jpeg;base64,' + imgs[i] : null);
+    return { n: s.n, titles: s.titles, imgs: out };
+  };
 
   // ----- the local "spreadsheet" -----
   function configRow(a) {
@@ -2064,6 +2088,12 @@ function call(fn) {
   .q .qnum { font-family:Cambria, Caladea, Georgia, serif; font-weight:700; font-size:20px; color:var(--navy); }
   .q .prompt { margin:6px 0 14px; font-size:19px; line-height:1.55; color:#141a2e; font-weight:500; background:#f2f5fd; border-left:6px solid var(--navy); border-radius:10px; padding:12px 14px; }
   .q.cur { box-shadow:0 0 0 3px var(--amber); }
+  .modal.slides { max-width:1100px; width:97vw; padding:10px; }
+  .slidebox { position:relative; background:#0f1530; border-radius:10px; overflow:hidden; aspect-ratio:16/9; display:flex; align-items:center; justify-content:center; touch-action:pan-y; }
+  .slidebox img { width:100%; height:100%; object-fit:contain; display:block; }
+  .slidebox .hiddenslide { color:#fff; text-align:center; padding:20px; font-size:18px; line-height:1.5; }
+  .slidenav { display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap; }
+  .slidenav select { flex:1; min-width:140px; }
   .q .readbtn { margin-left:auto; }
   .q .part .plabel { font-size:15.5px; color:#3a4359; }
   #view.focus .q:not(.cur), #view.focus .group { display:none; }
@@ -2566,12 +2596,14 @@ function render() {
     (S.mode === 'test' ? '<p class="muted">Hints and answer checking are off. Do your own work.</p>' :
       '<p class="muted">Work each problem on paper, then enter your answer and press <b>Check</b>. You get ' + S.checksPerPart + ' checks per box. Stuck? Press <b>Coach</b> for a hint.</p>') +
     (S.mode !== 'test' && A.resources && A.resources.length ? '<button type="button" class="small" onclick="showMaterials()">📚 Lesson materials (' + A.resources.length + ')</button>' : '') +
+    '<span id="slideBtn"></span>' +
     '<div id="leaveBanner"></div><div id="bonusBanner"></div></div>';
   var lastGroup = null;
   A.questions.forEach(function (q) {
     if (q.group !== lastGroup) { h += '<h2 class="group">' + esc(q.group) + '</h2>'; lastGroup = q.group; }
     h += '<div class="card q" id="q_' + esc(q.id) + '" data-qid="' + esc(q.id) + '"><div class="qhead"><span class="qnum">' + esc(q.label) + '.</span>' +
       (q.fromPresentation ? '<span class="tag amber">FROM THE PRESENTATION · ' + esc(q.fromPresentation) + '</span>' : '') +
+      (q.fromPresentation && /slide\s*(\d+)/i.test(q.fromPresentation) ? '<span class="slideslot" data-slide="' + (+q.fromPresentation.match(/slide\s*(\d+)/i)[1]) + '"></span>' : '') +
       ('speechSynthesis' in window ? '<button type="button" class="small ghost readbtn" title="Read the question out loud" onclick="readQ(\'' + esc(q.id) + '\')">🔊 Read to me</button>' : '') + '</div>' +
       '<div class="prompt noselect">' + esc(q.prompt) + '</div>';
     if (q.table) h += '<table class="data noselect">' + q.table.map(function (r) { return '<tr>' + r.map(function (c) { return '<td>' + esc(c) + '</td>'; }).join('') + '</tr>'; }).join('') + '</table>';
@@ -2610,6 +2642,7 @@ function render() {
   Tools.refreshInputs();
   document.getElementById('btnFocus').style.display = '';
   applyFocus();
+  setupSlides();
   observeShown();
   updateProgress();
   updateLeaveBanner();
@@ -2877,6 +2910,56 @@ function showSubmitted(r) {
   v.innerHTML = h;
 }
 
+// ---------------- lesson presentation viewer ----------------
+var SLIDES = null, SLIDE_INFO = null, SLIDE_I = 1;
+function setupSlides() {
+  SLIDE_INFO = null; SLIDES = null;
+  if (S.mode === 'test') return;
+  var aid = S.aid;
+  call('api_slideInfo', aid).then(function (info) {
+    if (!info || S.aid !== aid) return; SLIDE_INFO = info;
+    var b = document.getElementById('slideBtn');
+    if (b) b.innerHTML = '<button type="button" class="small" onclick="openSlides(1)">📽 Review presentation</button>';
+    document.querySelectorAll('.slideslot').forEach(function (el) {
+      var n = +el.dataset.slide; if (n >= 1 && n <= info.n) el.innerHTML = '<button type="button" class="small ghost" onclick="openSlides(' + n + ')">📽 See slide ' + n + '</button>';
+    });
+  }).catch(function () {});
+}
+function openSlides(n) {
+  SLIDE_I = n || 1;
+  modal('<div class="slidebox" id="slideBox"><div class="hiddenslide">Loading the presentation…</div></div><div class="slidenav" id="slideNav"></div>');
+  document.getElementById('modal').classList.add('slides');
+  if (SLIDES) return showSlide();
+  call('api_slides', S.aid).then(function (d) { SLIDES = d; showSlide(); })
+    .catch(function (e) { var b = document.getElementById('slideBox'); if (b) b.innerHTML = '<div class="hiddenslide">The presentation could not load. Check your internet and try again.</div>'; });
+}
+function showSlide() {
+  var box = document.getElementById('slideBox'), nav = document.getElementById('slideNav'); if (!box || !SLIDES) return;
+  var n = SLIDES.n; SLIDE_I = Math.max(1, Math.min(n, SLIDE_I));
+  var img = SLIDES.imgs[SLIDE_I - 1];
+  box.innerHTML = img ? '<img alt="Slide ' + SLIDE_I + '" src="' + img + '">' :
+    '<div class="hiddenslide"><div style="font-size:40px">🙈</div><b>Guided Practice answer</b><br>This slide is hidden while you work. Try the problem in your assignment, then use Check and the Coach.</div>';
+  nav.innerHTML = '<button type="button" class="small" onclick="SLIDE_I--;showSlide()"' + (SLIDE_I <= 1 ? ' disabled' : '') + '>◀ Back</button>' +
+    '<select onchange="SLIDE_I=+this.value;showSlide()">' + SLIDES.titles.map(function (t, i) { return '<option value="' + (i + 1) + '"' + (i + 1 === SLIDE_I ? ' selected' : '') + '>Slide ' + (i + 1) + ' of ' + n + ' · ' + esc(t) + (SLIDES.imgs[i] ? '' : ' (hidden)') + '</option>'; }).join('') + '</select>' +
+    '<button type="button" class="small primary" onclick="SLIDE_I++;showSlide()"' + (SLIDE_I >= n ? ' disabled' : '') + '>Next ▶</button>' +
+    '<button type="button" class="small ghost" onclick="closeSlides()">Close</button>';
+}
+function closeSlides() { document.getElementById('modal').classList.remove('slides'); closeModal(); }
+document.addEventListener('keydown', function (e) {
+  var m = document.getElementById('modal'); if (!m || !m.classList.contains('slides') || document.getElementById('modalBg').style.display === 'none') return;
+  if (e.key === 'ArrowRight') { SLIDE_I++; showSlide(); e.preventDefault(); }
+  else if (e.key === 'ArrowLeft') { SLIDE_I--; showSlide(); e.preventDefault(); }
+  else if (e.key === 'Escape') closeSlides();
+});
+(function () {
+  var x0 = null;
+  document.addEventListener('touchstart', function (e) { if (e.target.closest && e.target.closest('#slideBox')) x0 = e.touches[0].clientX; }, { passive: true });
+  document.addEventListener('touchend', function (e) {
+    if (x0 === null) return; var dx = e.changedTouches[0].clientX - x0; x0 = null;
+    if (Math.abs(dx) > 50) { SLIDE_I += dx < 0 ? 1 : -1; showSlide(); }
+  }, { passive: true });
+})();
+
 // ---------------- question focus and read aloud ----------------
 var FOCUS = (function () { try { return localStorage.getItem('ac_focus') === '1'; } catch (e) { return false; } })(), QI = 0;
 function toggleFocus() { FOCUS = !FOCUS; try { localStorage.setItem('ac_focus', FOCUS ? '1' : '0'); } catch (e) {} applyFocus(); }
@@ -2970,8 +3053,8 @@ document.addEventListener('input', function (e) {
   }
 }, true);
 
-function modal(html) { document.getElementById('modal').innerHTML = html; document.getElementById('modalBg').style.display = 'flex'; }
-function closeModal() { document.getElementById('modalBg').style.display = 'none'; }
+function modal(html) { document.getElementById('modal').classList.remove('slides'); document.getElementById('modal').innerHTML = html; document.getElementById('modalBg').style.display = 'flex'; }
+function closeModal() { document.getElementById('modalBg').style.display = 'none'; document.getElementById('modal').classList.remove('slides'); }
 
 // ---------------- on-screen work ----------------
 S.stepNote = {};
