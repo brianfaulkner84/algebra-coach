@@ -2591,6 +2591,7 @@ function key(q, p) { return q.id + '.' + p.id; }
 
 function render() {
   var A = S.A, v = document.getElementById('view'), h = '';
+  track(S.aid + (S.mode === 'test' ? '-test' : ''));
   h += '<div class="card"><div class="row"><span class="tag ' + (S.mode === 'test' ? 'test' : '') + '">' + (S.mode === 'test' ? 'TEST' : 'PRACTICE') + '</span>' +
     '<span class="muted">' + esc(A.course || '') + ' · Larson Algebra 1 ' + esc(A.pages || '') + '</span></div>' +
     (S.mode === 'test' ? '<p class="muted">Hints and answer checking are off. Do your own work.</p>' :
@@ -2682,7 +2683,7 @@ function getSolution(qid) {
   var mine = {}; Object.keys(S.answers).forEach(function (k) { if (k.split('.')[0] === qid) mine[k] = S.answers[k]; });
   call('api_solution', S.aid, qid, mine).then(function (r) {
     if (r.denied) { toast(r.msg, 5000); return; }
-    S.revealed[qid] = r.steps; S.solutionLocks = r.locked !== false;
+    S.revealed[qid] = r.steps; S.solutionLocks = r.locked !== false; track(S.aid + '-solution', true);
     showSolution(qid, r.steps); updateSolutionRow(qid); updateBonusBanner();
   }).catch(function (e) { toast('Could not load the solution: ' + (e.message || e)); });
 }
@@ -2832,6 +2833,7 @@ function check(qid, pid) {
   if (resp === undefined || resp === '' || (resp && resp.points && !resp.points.length) || (resp && resp.rows && !tableFilled(resp))) { fb.className = 'fb invalid'; fb.textContent = 'Enter an answer first.'; return; }
   btn.disabled = true; fb.className = 'fb invalid'; fb.textContent = 'Checking…';
   var meta = { msSinceShown: S.shownAt[qid] ? Date.now() - S.shownAt[qid] : 99999, keys: S.keys[k] || 0 };
+  trackOnce(S.aid, 'started');
   call('api_check', S.aid, qid, pid, resp, meta).then(function (r) {
     fb.className = 'fb ' + r.status;
     fb.textContent = r.status === 'correct' ? '✓ Correct' : r.msg;
@@ -2855,6 +2857,7 @@ function check(qid, pid) {
 }
 
 function coach(qid) {
+  track(S.aid + '-hint', true);
   var box = document.getElementById('coach_' + qid);
   box.style.display = 'block';
   if (!box.innerHTML) box.innerHTML = '<div class="muted">Asking the coach…</div>';
@@ -2885,7 +2888,7 @@ function submitNow() {
   var evs = S.events.splice(0);
   document.getElementById('view').insertAdjacentHTML('afterbegin', '<div class="card center muted" id="submitting">Submitting…</div>');
   call('api_submit', S.aid, S.answers, evs).then(function (r) {
-    S.status = 'submitted'; fsWanted = false;
+    S.status = 'submitted'; fsWanted = false; trackOnce(S.aid, 'submitted');
     try { if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (e) {}
     try { localStorage.removeItem(LOCAL + S.aid); } catch (e) {}
     showSubmitted(r);
@@ -2910,6 +2913,36 @@ function showSubmitted(r) {
   v.innerHTML = h;
 }
 
+// ---------------- anonymous usage counts (GoatCounter) ----------------
+// Off unless the site config has a GoatCounter code. Sends only a page or event name like
+// "algebra/ch4-4.2-submitted". Never names, answers, or anything a student types. No cookies.
+var STAT = { q: [], st: 0 };   // st: 0 not loaded, 1 loading, 2 ready, 3 off
+function track(name, isEvent) {
+  var code = String((window.AC_CONFIG || {}).stats || '').trim().replace(/[^a-z0-9-]/gi, '');
+  if (!code || STAT.st === 3) return;
+  var path = 'algebra/' + name;
+  STAT.q.push({ path: path, title: path, event: !!isEvent });
+  if (STAT.st === 2) return flushStats();
+  if (STAT.st === 1) return;
+  STAT.st = 1;
+  try {
+    window.goatcounter = { no_onload: true };
+    var sc = document.createElement('script'); sc.async = true; sc.src = 'https://gc.zgo.at/count.js';
+    sc.setAttribute('data-goatcounter', 'https://' + code + '.goatcounter.com/count'); sc.setAttribute('data-ac', '1');
+    sc.onload = function () { STAT.st = 2; flushStats(); };
+    sc.onerror = function () { STAT.st = 3; STAT.q.length = 0; };
+    document.head.appendChild(sc);
+  } catch (e) { STAT.st = 3; }
+}
+function flushStats() { while (STAT.q.length) { var x = STAT.q.shift(); try { window.goatcounter.count(x); } catch (e) {} } }
+/** Count an event once per device for this assignment try (started, submitted). */
+function trackOnce(aid, what) {
+  var k = 'ac_stat_' + aid + '_' + what;
+  try { if (localStorage.getItem(k)) return; localStorage.setItem(k, '1'); } catch (e) {}
+  track(aid + '-' + what, true);
+}
+function untrackOnce(aid) { try { ['started', 'submitted'].forEach(function (w) { localStorage.removeItem('ac_stat_' + aid + '_' + w); }); } catch (e) {} }
+
 // ---------------- lesson presentation viewer ----------------
 var SLIDES = null, SLIDE_INFO = null, SLIDE_I = 1;
 function setupSlides() {
@@ -2926,7 +2959,7 @@ function setupSlides() {
   }).catch(function () {});
 }
 function openSlides(n) {
-  SLIDE_I = n || 1;
+  SLIDE_I = n || 1; track(S.aid + '-slides', true);
   modal('<div class="slidebox" id="slideBox"><div class="hiddenslide">Loading the presentation…</div></div><div class="slidenav" id="slideNav"></div>');
   document.getElementById('modal').classList.add('slides');
   if (SLIDES) return showSlide();
@@ -3151,7 +3184,7 @@ function openResource(i) {
   } else openOutside(r.url, r.title);
 }
 function openOutside(url, label) {
-  resourceOut = { t: Date.now(), where: label || url };
+  resourceOut = { t: Date.now(), where: label || url }; track(S.aid + (/youtube\.com\/results/.test(url) ? '-youtube' : '-material'), true);
   window.open(url, '_blank', 'noopener');
 }
 function resButtons(list) {
@@ -3178,6 +3211,7 @@ function showVideos(qid) {
 // ================= Static-site version: replaces a few student-page functions =================
 
 function loadHome() {
+  if (!window.__homeCounted) { window.__homeCounted = 1; track('home'); }
   document.getElementById('barTitle').textContent = 'Algebra Coach';
   document.getElementById('btnHome').style.display = 'none';
   setSaveStatus('');
@@ -3216,6 +3250,7 @@ function saveProfile() {
 }
 
 function showLocked() {
+  track(S.aid + '-locked', true);
   fsWanted = false; document.getElementById('fsCover').style.display = 'none';
   try { if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (e) {}
   Tools.toggleCalc(false);
@@ -3305,6 +3340,7 @@ function askRedo() {
 function doRedo() {
   var aid = S.aid;
   call('api_redo', aid).then(function (r) {
+    untrackOnce(aid); track(aid + '-redo', true);
     try { localStorage.removeItem(LOCAL + aid); } catch (e) {}
     closeModal(); toast('Starting over. This is try ' + r.attempt + '.', 3000);
     openAssignment(aid);

@@ -74,5 +74,6 @@ window.AC_CONFIG = {
   "x": "wQ2LmWL6Jgz7tkWMAvckpCvFB5hdvZ4s_HCLWThgsNs",
   "y": "9RYKeU0iQRrMKr129NAJxIhqiE0HNxIkZU_ahFbnclo",
   "crv": "P-256"
- }
+ },
+ "stats": "brianfaulkneraquinasschools"
 };
