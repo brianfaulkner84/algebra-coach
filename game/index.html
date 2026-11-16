@@ -12,23 +12,24 @@
   .in:focus{outline:none;border-color:var(--navy)}
   .code-in{letter-spacing:10px;text-align:center;font-size:34px;font-weight:700}
   .msg{margin-top:12px;font-weight:700;color:var(--bad);min-height:24px}
-  .big{font-family:Cambria,Georgia,serif;font-size:32px;color:var(--navy);margin:8px 0}
-  .hud{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+  .big{font-family:Cambria,Georgia,serif;font-size:30px;color:var(--navy);margin:8px 0}
+  .hud{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
   .hud .sp{flex:1}
   .mult{display:inline-block;background:var(--navy);color:var(--amber);border-radius:999px;padding:4px 14px;font-weight:700;font-size:20px}
   .tgt{font-size:15px;color:var(--muted)}
+  .bank{font-size:15px;color:var(--navy);font-weight:700}
   .qtext{font-family:Cambria,Georgia,serif;font-size:24px;color:var(--navy);margin:0 0 12px}
   .tile{width:100%;border:0}
-  .result{text-align:center;padding:22px 16px;border-radius:14px;color:#fff}
+  .result{text-align:center;padding:20px 16px;border-radius:14px;color:#fff}
   .result.good{background:var(--good)}.result.bad{background:var(--bad)}.result.none{background:#6b7280}
-  .result .r1{font-family:Cambria,Georgia,serif;font-size:38px;font-weight:700}
-  .result .r2{font-size:22px;margin-top:6px}
+  .result .r1{font-family:Cambria,Georgia,serif;font-size:36px;font-weight:700}
+  .result .r2{font-size:21px;margin-top:6px}
   .lines{list-style:none;margin:0;padding:0}
-  .lines li{padding:9px 2px;border-bottom:1px solid var(--line);font-size:19px}
+  .lines li{padding:9px 2px;border-bottom:1px solid var(--line);font-size:18px}
   .lines .hit{color:var(--bad);font-weight:700}
   .lines .ok{color:var(--good);font-weight:700}
   .wait{text-align:center;padding:26px 10px}
-  .spin{width:40px;height:40px;border:5px solid var(--ice);border-top-color:var(--navy);border-radius:50%;margin:16px auto;animation:sp 1s linear infinite}
+  .spin{width:34px;height:34px;border:5px solid var(--ice);border-top-color:var(--navy);border-radius:50%;margin:10px auto;animation:sp 1s linear infinite}
   @keyframes sp{to{transform:rotate(360deg)}}
   .mycastle{display:flex;align-items:center;gap:14px}
   .mycastle svg{width:120px;height:auto;flex:none}
@@ -39,6 +40,31 @@
   .trow .bk{color:var(--muted)}
   .trow.sel{border-color:var(--bad);background:#FDECEA}
   .trow.me{opacity:.6;cursor:default}
+  .tcard svg{width:100%;height:auto;display:block;margin:8px 0}
+  .tcard h2{font-family:Cambria,Georgia,serif;color:var(--navy);margin:0;font-size:26px}
+  .tcard p{font-size:19px;margin:6px 0 0}
+  .dots{display:flex;gap:6px;justify-content:center;margin:14px 0}
+  .dots i{width:10px;height:10px;border-radius:50%;background:var(--ice)}
+  .dots i.on{background:var(--navy)}
+  .tnav{display:flex;gap:10px}
+  .tnav .btn{flex:1}
+  .ready{background:#EAF6EE;border:1px solid var(--good);color:var(--good);border-radius:12px;padding:12px;text-align:center;font-weight:700;margin-top:12px}
+  .keyidea{background:var(--navy);color:#fff;border-radius:12px;padding:14px 16px;font-size:20px;font-weight:700}
+  .keyidea small{display:block;color:var(--amber);font-size:13px;letter-spacing:2px;margin-bottom:4px}
+  .term{background:#fff;border:1px solid var(--line);border-left:6px solid var(--amber);border-radius:10px;padding:9px 12px;font-size:17px;margin-top:8px}
+  .term b{color:var(--navy);display:block;font-family:Cambria,Georgia,serif;font-size:18px}
+  .ex{margin-top:10px;font-size:17px;color:#7a5410;background:#FFF4E0;border:1px solid var(--amber);border-radius:10px;padding:9px 12px}
+  .paused{background:var(--bad);color:#fff;border-radius:10px;padding:8px 12px;text-align:center;font-weight:700;margin-bottom:10px}
+  .small-timer{width:56px;height:56px;font-size:22px}
+  .worth{background:#FFF4E0;border:2px solid var(--amber);border-radius:12px;padding:8px 12px;margin-bottom:12px;display:flex;align-items:center;gap:10px}
+  .worth .v{font-family:Cambria,Georgia,serif;font-size:30px;font-weight:700;color:var(--navy);min-width:90px}
+  .worth .m{color:#7a5410;font-size:16px}
+  table.rev{width:100%;border-collapse:collapse;margin-top:6px;font-size:17px}
+  table.rev th{background:var(--navy);color:#fff;text-align:left;padding:6px 8px;font-size:15px}
+  table.rev td{border-bottom:1px solid var(--line);padding:6px 8px}
+  table.rev .hit{color:var(--bad);font-weight:700}
+  .revbtn{background:var(--bad);color:#fff;padding:5px 10px;font-size:14px;font-weight:700}
+  .revbtn.on{background:var(--good)}
 </style>
 </head>
 <body>
@@ -49,6 +75,8 @@
 </div>
 
 <div class="center">
+  <div class="paused hidden" id="pausedNote">Paused. Listen to your teacher.</div>
+
   <!-- JOIN -->
   <div class="card" id="vJoin">
     <h1 style="margin-top:0;color:var(--navy)">Join the battle</h1>
@@ -60,41 +88,54 @@
       <button class="btn amber" id="btnJoin" type="submit" style="width:100%;margin-top:18px">Join</button>
     </form>
     <div class="msg" id="joinMsg"></div>
-    <div class="muted" style="margin-top:10px;font-size:16px">Right answers build your castle: every second left on the clock is a brick. Keep answering right to grow your multiplier. First full castle wins.</div>
   </div>
 
-  <!-- WAITING (lobby / round banner) -->
-  <div class="card wait hidden" id="vWait">
-    <div class="big" id="waitTitle">You're in!</div>
-    <div class="spin"></div>
-    <div class="muted" id="waitSub" style="font-size:20px">Watch the screen. The game starts soon.</div>
-    <div class="tgt" id="waitTgt" style="margin-top:10px"></div>
+  <!-- TUTORIAL (lobby) -->
+  <div class="hidden" id="vTut">
+    <div class="card tcard"><div class="muted" id="tutStep"></div><h2 id="tutTitle"></h2><div id="tutPic"></div><p id="tutText"></p></div>
+    <div class="dots" id="tutDots"></div>
+    <div class="tnav"><button class="btn ghost" id="tutBack">Back</button><button class="btn amber" id="tutNext">Next</button></div>
+    <div class="ready" id="tutReady">You're in! Read how to play. The game starts when your teacher presses Start.</div>
+  </div>
+
+  <!-- LESSON between rounds -->
+  <div class="hidden" id="vLesson">
+    <div class="hud"><div><div class="muted" id="lsSub" style="font-size:15px"></div><div class="big" id="lsTitle" style="margin:0"></div></div><span class="sp"></span><div class="timer small-timer" id="lsTimer">10</div></div>
+    <div class="keyidea"><small>KEY IDEA</small><span id="lsKey"></span></div>
+    <div id="lsTerms"></div>
+    <div class="ex" id="lsEx"></div>
+    <div class="tgt" id="lsTgt" style="margin-top:10px;text-align:center"></div>
   </div>
 
   <!-- QUESTION -->
   <div class="hidden" id="vQ">
-    <div class="hud"><span class="mult" id="qMult">×1</span><span class="tgt" id="qTgt"></span><span class="sp"></span><div class="timer" id="timer">30</div></div>
+    <div class="hud"><span class="mult" id="qMult">×1</span><span class="tgt" id="qTgt"></span><span class="sp"></span><div class="timer" id="timer">60</div></div>
     <div class="card" style="margin-bottom:14px">
       <div class="muted" id="qMeta" style="font-size:15px;margin-bottom:6px"></div>
       <p class="qtext" id="qText"></p>
       <img class="qimg hidden" id="qImg" alt="Graph for this question">
     </div>
+    <div class="worth" id="worth"><span class="v" id="worthV">0</span><span class="m" id="worthM"></span></div>
     <div class="tiles" id="tiles"></div>
     <div class="card wait hidden" id="locked" style="margin-top:14px"><div class="big">Answer locked in</div><div class="muted">Wait for the timer.</div></div>
   </div>
 
   <!-- RESULT -->
   <div class="hidden" id="vR">
+    <div class="hud" style="margin-bottom:8px"><span class="muted" id="rNext">Next: battle phase</span><span class="sp"></span><div class="timer small-timer" id="rTimer">15</div></div>
     <div class="result" id="rBox"><div class="r1" id="r1"></div><div class="r2" id="r2"></div></div>
-    <div class="card" style="margin-top:14px"><ul class="lines" id="rLines"></ul></div>
-    <div class="explain" id="rExplain" style="margin-top:14px"></div>
+    <div class="explain" id="rExplain" style="margin-top:12px"></div>
+    <div id="rLearn" class="hidden" style="margin-top:12px"></div>
+    <div class="card" style="margin-top:12px"><ul class="lines" id="rLines"></ul></div>
+    <div class="card hidden" id="rRevBox" style="margin-top:12px;padding:12px"><b style="color:var(--navy);font-family:Cambria,Georgia,serif;font-size:19px">💥 Who attacked you (whole game)</b><table class="rev" id="rRevTable"></table><div class="muted" style="font-size:15px;margin-top:6px">Plot your revenge in the battle phase.</div></div>
   </div>
 
   <!-- BATTLE: pick a target -->
   <div class="hidden" id="vB">
-    <div class="hud"><span class="big" style="margin:0">Pick a target</span><span class="sp"></span><div class="timer" id="bTimer">20</div></div>
-    <div class="card mycastle" style="margin-bottom:12px"><div id="myCastle"></div><div><div style="font-size:22px;font-weight:700" id="myBricks"></div><div><span class="mult" id="bMult">×1</span></div><div class="muted" id="myRank" style="margin-top:6px"></div></div></div>
-    <p class="muted" style="margin:6px 2px 10px">Your attack hits only if you answer the next question right. It knocks off <span id="atkRule"></span>. Tap again to cancel.</p>
+    <div class="hud"><span class="big" style="margin:0">Pick a target</span><span class="sp"></span><div class="timer" id="bTimer">15</div></div>
+    <div class="card mycastle" style="margin-bottom:12px"><div id="myCastle"></div><div><div style="font-size:21px;font-weight:700" id="myBricks"></div><div><span class="mult" id="bMult">×1</span></div><div class="muted" id="myRank" style="margin-top:6px"></div><div class="bank" id="myBank" style="margin-top:4px"></div></div></div>
+    <div class="card hidden" id="revBox" style="margin-bottom:12px;padding:12px"><b style="color:var(--navy);font-family:Cambria,Georgia,serif;font-size:19px">💥 Who attacked you</b><table class="rev" id="revTable"></table></div>
+    <p class="muted" style="margin:6px 2px 10px" id="atkRule"></p>
     <div class="targets" id="targets"></div>
   </div>
 
@@ -112,20 +153,22 @@
 <script src="peerjs.min.js"></script>
 <script src="net.js"></script>
 <script src="castle.js"></script>
+<script src="tutorial.js"></script>
 <script>
 (function(){
 "use strict";
 const $=id=>document.getElementById(id);
 const SHAPES=["▲","◆","●","■"];
-const views=["vJoin","vWait","vQ","vR","vB","vEnd"];
+const views=["vJoin","vTut","vLesson","vQ","vR","vB","vEnd"];
 function show(v){views.forEach(x=>$(x).classList.toggle("hidden",x!==v));}
 function store(k,v){try{v===undefined?localStorage.removeItem(k):localStorage.setItem(k,v);}catch(e){}}
 function load(k){try{return localStorage.getItem(k);}catch(e){return null;}}
 function li(html){return `<li>${html}</li>`;}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+const fmt=n=>Number(n||0).toLocaleString();
 let pid=load("ac-live-pid");if(!pid){pid="p"+Math.random().toString(36).slice(2)+Date.now().toString(36);store("ac-live-pid",pid);}
 
-let peer=null,conn=null,joined=false,wantCode=null,wantName=null,last=null,tick=null,retryTimer=null,joinTimer=null;
+let peer=null,conn=null,joined=false,wantCode=null,wantName=null,last=null,tick=null,retryTimer=null,joinTimer=null,tutI=0,tutCards=null;
 $("code").value=load("ac-live-code")||"";$("name").value=load("ac-live-name")||"";
 
 $("joinForm").addEventListener("submit",e=>{e.preventDefault();
@@ -167,60 +210,118 @@ function onData(d){
   if(d.t!=="state")return;
   if(!joined){joined=true;clearTimeout(joinTimer);$("btnJoin").disabled=false;}
   $("netNote").textContent="";
-  const keepBattle=last&&last.phase==="battle"&&d.phase==="battle";
-  last=d;render(d,keepBattle);
+  const samePhase=last&&last.phase===d.phase&&(!d.q||!last.q||last.q.qi===d.q.qi)&&last.paused===d.paused;
+  last=d;render(d,samePhase);
 }
-function runTimer(el,ms,onDone){clearInterval(tick);const end=Date.now()+(ms||0);const t=()=>{const left=Math.max(0,Math.ceil((end-Date.now())/1000));el.textContent=left;el.classList.toggle("low",left<=5);if(left<=0){clearInterval(tick);if(onDone)onDone();}};t();tick=setInterval(t,250);}
-function tgtText(d){return d.targetName?"Target: "+d.targetName:"No target";}
-function render(d,keepTimer){
-  $("who").textContent=d.name+"  |  "+d.bricks+" bricks";$("who").classList.remove("hidden");
-  if(!keepTimer)clearInterval(tick);
-  if(d.phase==="lobby"){show("vWait");$("waitTitle").textContent="You're in, "+d.name+"!";$("waitSub").textContent="Watch the screen. The game starts soon.";$("waitTgt").textContent="";return;}
-  if(d.phase==="round"){show("vWait");$("waitTitle").textContent=d.roundName;$("waitSub").textContent=d.double?"Base bricks are doubled this round. Get ready.":"Get ready.";$("waitTgt").textContent=tgtText(d)+"  |  Multiplier ×"+d.mult;return;}
+function runTimer(el,ms,paused,onDone){
+  clearInterval(tick);
+  if(paused){el.textContent="❚❚";el.classList.remove("low");return;}
+  const end=Date.now()+(ms||0);
+  const t=()=>{const left=Math.max(0,Math.ceil((end-Date.now())/1000));el.textContent=left;el.classList.toggle("low",left<=5);if(left<=0){clearInterval(tick);if(onDone)onDone();}};
+  t();tick=setInterval(t,250);
+}
+function tgtText(d){return d.targetName?"🎯 Target: "+d.targetName:"No target";}
+function bankText(d){return d.bank?`💾 Saved attacks: ${fmt(d.bank)} bricks`:"";}
+function learnHtml(L,withKey){
+  if(!L)return "";
+  return (withKey?`<div class="keyidea"><small>REMEMBER</small>${esc(L.key)}</div>`:"")+
+    L.terms.map(([t,x])=>`<div class="term"><b>${esc(t)}</b>${esc(x)}</div>`).join("")+
+    `<div class="ex">Example: ${esc(L.example)}</div>`;
+}
+// ---------- tutorial
+function showTut(){
+  const c=tutCards[tutI];
+  $("tutStep").textContent=`How to play  |  ${tutI+1} of ${tutCards.length}`;$("tutTitle").textContent=c.title;$("tutPic").innerHTML=c.pic;$("tutText").textContent=c.text;
+  $("tutDots").innerHTML=tutCards.map((_,i)=>`<i class="${i===tutI?"on":""}"></i>`).join("");
+  $("tutBack").disabled=tutI===0;$("tutNext").textContent=tutI===tutCards.length-1?"Start over":"Next";
+}
+$("tutBack").onclick=()=>{if(tutI>0){tutI--;showTut();}};
+$("tutNext").onclick=()=>{tutI=tutI<tutCards.length-1?tutI+1:0;showTut();};
+
+function render(d,samePhase){
+  $("who").textContent=d.name+"  |  "+fmt(d.bricks)+" bricks";$("who").classList.remove("hidden");
+  $("pausedNote").classList.toggle("hidden",!d.paused);
+  if(!samePhase)clearInterval(tick);
+  if(d.phase==="lobby"){
+    if(!tutCards||!samePhase){tutCards=Tutorial.cards(d.rules||{});if(!samePhase)tutI=0;}
+    show("vTut");showTut();$("tutReady").textContent=`You're in, ${d.name}! Read how to play. The game starts when your teacher presses Start.`;return;
+  }
+  if(d.phase==="round"){
+    show("vLesson");const L=d.learn||{key:"",terms:[],example:""};
+    $("lsSub").textContent=d.double?"Base bricks are doubled this round":"Up next";$("lsTitle").textContent=d.roundName;
+    $("lsKey").textContent=L.key;$("lsTerms").innerHTML=L.terms.map(([t,x])=>`<div class="term"><b>${esc(t)}</b>${esc(x)}</div>`).join("");
+    $("lsEx").textContent="Example: "+L.example;$("lsTgt").textContent=tgtText(d)+"  |  ×"+d.mult+(d.bank?"  |  "+bankText(d):"");
+    if(!samePhase)runTimer($("lsTimer"),d.remaining,d.paused);return;
+  }
   if(d.phase==="question"){
-    show("vQ");const q=d.q;
-    $("qMult").textContent="×"+d.mult;$("qTgt").textContent=tgtText(d);
-    $("qMeta").textContent=`Question ${q.n} of ${q.of}${q.double?"  |  Base bricks doubled":""}`;
-    $("qText").textContent=q.text;
-    if(q.img){$("qImg").src=q.img;$("qImg").classList.remove("hidden");}else $("qImg").classList.add("hidden");
-    const answered=d.answered!=null;$("tiles").innerHTML="";
-    q.choices.forEach((c,i)=>{const b=document.createElement("button");b.className="tile t"+i+(answered&&d.answered!==i?" dim":"");b.disabled=answered;
-      b.innerHTML=`<span class="shape">${SHAPES[i]}</span><span></span>`;b.lastChild.textContent=c;b.onclick=()=>pick(q.qi,i);$("tiles").appendChild(b);});
-    $("locked").classList.toggle("hidden",!answered);
-    runTimer($("timer"),d.remaining,()=>[...$("tiles").children].forEach(b=>b.disabled=true));return;
+    const q=d.q,answered=d.answered!=null;
+    if(!samePhase){
+      show("vQ");
+      $("qMult").textContent="×"+d.mult;$("qTgt").textContent=tgtText(d)+(d.bank?"  |  "+bankText(d):"");
+      $("qMeta").textContent=`Question ${q.n} of ${q.of}${q.double?"  |  Base bricks doubled":""}`;
+      $("qText").textContent=q.text;
+      if(q.img){$("qImg").src=q.img;$("qImg").classList.remove("hidden");}else $("qImg").classList.add("hidden");
+      $("tiles").innerHTML="";
+      q.choices.forEach((c,i)=>{const b=document.createElement("button");b.className="tile t"+i;
+        b.innerHTML=`<span class="shape">${SHAPES[i]}</span><span></span>`;b.lastChild.textContent=c;b.onclick=()=>pick(q.qi,i);$("tiles").appendChild(b);});
+      const qEnd=Date.now()+(d.remaining||0),dbl=q.double?2:1;
+      runTimer($("timer"),d.remaining,false,()=>[...$("tiles").children].forEach(b=>b.disabled=true));
+      clearInterval(window.__worth);
+      const w=()=>{if(last.answered!=null)return;const base=dbl*Math.max(0,Math.ceil((qEnd-Date.now())/1000));
+        $("worthV").textContent=fmt(base*d.mult);$("worthM").textContent=`bricks if you answer right now (${base} base × ${d.mult})`;
+        if(base<=0){$("worthV").textContent="0";$("worthM").textContent="Time's up";clearInterval(window.__worth);}};
+      w();window.__worth=setInterval(w,250);
+    }
+    if(answered){clearInterval(window.__worth);$("worthM").textContent="locked in: you get these bricks if your answer is right";}
+    if(answered)[...$("tiles").children].forEach((b,k)=>{b.disabled=true;b.classList.toggle("dim",k!==d.answered);});
+    $("locked").classList.toggle("hidden",!answered);return;
   }
   if(d.phase==="reveal"){
     show("vR");const L=d.last||{};
+    $("rNext").textContent=d.winnerName?"Game over next":"Next: battle phase";
     $("rBox").className="result "+(L.right?"good":L.answered?"bad":"none");
     $("r1").textContent=L.right?"Correct!":L.answered?"Not quite":"Time's up";
-    $("r2").textContent=L.right?`+${L.built} bricks (${L.base} × ${L.multUsed})`:"Answer: "+d.q.choices[d.correct];
+    $("r2").textContent=L.right?`+${fmt(L.built)} bricks (${L.base} × ${L.multUsed})`:"Right answer: "+d.q.choices[d.correct];
+    $("rExplain").textContent=(L.right?"Why: ":"How to get it: ")+(d.explain||"");
+    if(!L.right&&d.learn){$("rLearn").innerHTML=learnHtml(d.learn,true);$("rLearn").classList.remove("hidden");}else $("rLearn").classList.add("hidden");
     const lines=[];
-    lines.push(li(L.right?`<span class="ok">Multiplier up: ×${d.mult}</span>`:`Multiplier ${d.mult<(L.multUsed||1)?"down":"stays"}: ×${d.mult}`));
-    if(L.attack)lines.push(li(L.attack.miss?`Your attack on ${esc(L.attack.to)} missed (wrong answer).`:`⚔ You hit ${esc(L.attack.to)}: <span class="hit">−${L.attack.dmg}</span>`));
-    (L.hits||[]).forEach(h=>lines.push(li(`💥 ${esc(h.from)} hit your castle: <span class="hit">−${h.dmg.toLocaleString()}</span>`)));
-    if(L.blocked)lines.push(li(`🛡 Your walls blocked ${L.blocked.toLocaleString()} bricks.`));
-    lines.push(li(`Castle: <b>${d.bricks.toLocaleString()}</b> of ${d.goal.toLocaleString()} bricks  |  Rank ${d.rank} of ${d.players}`));
+    lines.push(li(L.right?`<span class="ok">Multiplier up: ×${d.mult}</span>`:`Multiplier stays at ×${d.mult}. Get the next one right to raise it!`));
+    if(L.attack)lines.push(li(L.attack.miss?`Your attack on ${esc(L.attack.to)} missed (wrong answer).`:`⚔ You hit ${esc(L.attack.to)}: <span class="hit">−${fmt(L.attack.dmg)}</span>${L.attack.saved?" (saved attacks included)":""}`));
+    if(L.banked)lines.push(li(`💾 No target, so your attack was saved: +${fmt(L.banked)}. Pick a target in the battle phase!`));
+    (L.hits||[]).forEach(h=>lines.push(li(`💥 ${esc(h.from)} hit your castle: <span class="hit">−${fmt(h.dmg)}</span>`)));
+    if(L.blocked)lines.push(li(`🛡 Your walls blocked ${fmt(L.blocked)} bricks.`));
+    lines.push(li(`Castle: <b>${fmt(d.bricks)}</b> of ${fmt(d.goal)} bricks  |  Rank ${d.rank} of ${d.players}`));
     if(d.winnerName)lines.unshift(li(`<span class="ok">🏰 ${esc(d.winnerName)} completed a full castle and wins!</span>`));
-    $("rLines").innerHTML=lines.join("");$("rExplain").textContent=d.explain||"";return;
+    $("rLines").innerHTML=lines.join("");
+    revTable($("rRevBox"),$("rRevTable"),d,false);
+    if(!samePhase)runTimer($("rTimer"),d.remaining,d.paused);return;
   }
   if(d.phase==="battle"){
     show("vB");
-    $("myCastle").innerHTML=Castle.svg(d.bricks,d.maxBricks,{me:true});$("myBricks").textContent=d.bricks.toLocaleString()+" of "+d.goal.toLocaleString()+" bricks";$("bMult").textContent="×"+d.mult;$("myRank").textContent=`Rank ${d.rank} of ${d.players}`;
-    $("atkRule").textContent=`seconds left × ${d.atk} bricks (your streak multiplier does not count)`;
+    $("myCastle").innerHTML=Castle.svg(d.bricks,d.maxBricks,{me:true});$("myBricks").textContent=fmt(d.bricks)+" of "+fmt(d.goal)+" bricks";$("bMult").textContent="×"+d.mult;$("myRank").textContent=`Rank ${d.rank} of ${d.players}`;
+    $("myBank").textContent=bankText(d);
+    $("atkRule").textContent=(d.targetName?`Your target stays ${d.targetName} unless you change it. `:"No target yet: right answers will be saved as attacks. ")+`A hit lands only if you answer the next question right: seconds left × ${d.atk} bricks. Tap your target again to cancel.`;
+    revTable($("revBox"),$("revTable"),d,true);
     $("targets").innerHTML="";
     d.board.forEach((o,i)=>{const b=document.createElement("button");b.className="trow"+(o.me?" me":"")+(d.target===o.uid?" sel":"");b.disabled=o.me;
-      b.innerHTML=`<span class="rk">${i+1}</span><span class="nm"></span><span class="mult" style="font-size:15px">×${o.mult}</span><span class="bk">${o.bricks.toLocaleString()}${o.bricks>=0.6*d.goal?` <b style="color:var(--bad)">⚠ ${Math.floor(100*o.bricks/d.goal)}%</b>`:""}</span><span>${o.me?"you":d.target===o.uid?"🎯":"⚔"}</span>`;
+      b.innerHTML=`<span class="rk">${i+1}</span><span class="nm"></span><span class="mult" style="font-size:15px">×${o.mult}</span><span class="bk">${fmt(o.bricks)}${o.bricks>=0.6*d.goal?` <b style="color:var(--bad)">⚠ ${Math.floor(100*o.bricks/d.goal)}%</b>`:""}</span><span>${o.me?"you":d.target===o.uid?"🎯":"⚔"}</span>`;
       b.querySelector(".nm").textContent=o.name;
       b.onclick=()=>{if(o.me)return;send({t:"target",to:d.target===o.uid?null:o.uid});};
       $("targets").appendChild(b);});
-    if(!keepTimer)runTimer($("bTimer"),d.remaining);return;
+    if(!samePhase)runTimer($("bTimer"),d.remaining,d.paused);return;
   }
   if(d.phase==="end"){
     show("vEnd");$("eRank").textContent=d.rank?`Your castle finished #${d.rank} of ${d.players}`:"Game over";
     if(d.winnerName&&d.rank!==1)$("eRank").textContent+=`. ${d.winnerName} built a full castle.`;
     $("eCastle").innerHTML=Castle.svg(d.bricks,d.maxBricks,{me:true,crown:d.rank===1});
-    $("eLines").innerHTML=[`<b>${d.bricks}</b> bricks`,`${d.correctCount} of ${d.total} correct`,`Best multiplier: ×${d.maxMult}`,`Bricks you knocked off: ${d.dealt}`,`Bricks you lost: ${d.taken}`].map(li).join("");return;
+    $("eLines").innerHTML=[`<b>${fmt(d.bricks)}</b> bricks`,`${d.correctCount} of ${d.total} correct`,`Best multiplier: ×${d.maxMult}`,`Bricks you knocked off: ${fmt(d.dealt)}`,`Bricks you lost: ${fmt(d.taken)}`].map(li).join("");return;
   }
+}
+function revTable(box,table,d,buttons){
+  const R=d.revenge||[];box.classList.toggle("hidden",!R.length);if(!R.length)return;
+  table.innerHTML=`<tr><th>Player</th><th>Hits</th><th>Bricks lost</th>${buttons?"<th></th>":""}</tr>`+
+    R.map(r=>`<tr><td>${esc(r.name)}</td><td>${r.times}</td><td class="hit">−${fmt(r.total)}</td>${buttons?`<td><button class="revbtn${d.target===r.uid?" on":""}" data-uid="${esc(r.uid)}">${d.target===r.uid?"🎯 Target":"Revenge"}</button></td>`:""}</tr>`).join("");
+  if(buttons)table.querySelectorAll("button[data-uid]").forEach(b=>b.onclick=()=>{const u=b.getAttribute("data-uid");if(d.target!==u)send({t:"target",to:u});});
 }
 function pick(qi,i){
   if(!send({t:"ans",qi,choice:i}))return;
