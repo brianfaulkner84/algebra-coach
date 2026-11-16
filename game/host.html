@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Math Castle Battle: Host</title>
+<link rel="stylesheet" href="game.css">
+<style>
+  .big-code{font-family:Cambria,Georgia,serif;font-size:120px;font-weight:700;color:var(--navy);letter-spacing:12px;line-height:1}
+  .joinbox{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:center}
+  .url{font-size:26px;font-weight:700;color:var(--navy);word-break:break-all}
+  .qtext{font-family:Cambria,Georgia,serif;font-size:34px;color:var(--navy);margin:0 0 14px}
+  .qhead{display:flex;align-items:center;gap:16px;margin-bottom:12px}
+  .qhead .meta{flex:1}
+  .rounds label,.opt{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);font-size:19px}
+  .rounds input{width:22px;height:22px}
+  select{font:inherit;padding:6px 10px;border-radius:8px;border:2px solid var(--line)}
+  .stat{font-size:22px;font-weight:700;color:var(--navy)}
+  .two{display:grid;grid-template-columns:3fr 2fr;gap:20px}
+  .status{font-size:15px}
+  .status .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#aaa;margin-right:6px}
+  .status.ok .dot{background:#3fcf7f}.status.err .dot{background:var(--bad)}
+  .banner{text-align:center;padding:60px 20px}
+  .banner .rn{color:var(--amber);font-weight:700;letter-spacing:3px;font-size:22px}
+  .banner h2{font-size:56px;color:var(--navy);margin:10px 0}
+  .castles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+  .cas{background:#fff;border:1px solid var(--line);border-radius:12px;padding:8px 8px 10px;text-align:center}
+  .cas svg{width:100%;height:auto;display:block}
+  .cas .nm{font-weight:700;font-size:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cas .bk{font-size:16px;color:var(--muted)}
+  .cas .rk{font-family:Cambria,Georgia,serif;font-weight:700;color:var(--amber);font-size:18px}
+  .warn{margin-top:6px;background:var(--bad);color:#fff;border-radius:8px;font-weight:700;font-size:15px;padding:2px 6px}
+  .prog{height:8px;background:var(--ice);border-radius:99px;margin-top:6px;overflow:hidden}.prog i{display:block;height:100%;background:var(--amber)}
+  .mult{display:inline-block;background:var(--navy);color:var(--amber);border-radius:999px;padding:1px 9px;font-weight:700;font-size:15px}
+  .feed{list-style:none;margin:0;padding:0;max-height:260px;overflow:auto}
+  .feed li{padding:7px 4px;border-bottom:1px solid var(--line);font-size:19px}
+  .feed .dmg{color:var(--bad);font-weight:700}
+  .feed .miss{color:var(--muted)}
+  table.res{width:100%;border-collapse:collapse;font-size:17px}
+  table.res th,table.res td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left}
+  table.res th{background:var(--navy);color:#fff}
+  .rules p{margin:6px 0}
+</style>
+</head>
+<body>
+<div class="bar">
+  <div class="brand">Math Castle <b>Battle</b></div>
+  <div class="pill dark">Chapter 4 Review</div>
+  <div class="sp"></div>
+  <div class="status" id="netStatus"><span class="dot"></span><span id="netText">Not started</span></div>
+  <div class="pill" id="barCode" style="display:none"></div>
+</div>
+
+<!-- SETUP -->
+<div class="wrap" id="vSetup">
+  <div class="two">
+    <div class="card">
+      <h1 style="margin-top:0;color:var(--navy)">Math Castle Battle</h1>
+      <p class="muted">Students play on their own devices. You run the game from this screen on the projector. Pick the rounds, then create the game.</p>
+      <div class="rounds" id="roundList"></div>
+      <div class="opt"><span style="flex:1">Bricks to win (full castle)</span><select id="optGoal"><option value="10000">10,000</option><option value="15000" selected>15,000</option><option value="20000">20,000</option><option value="25000">25,000</option></select></div>
+      <div class="opt"><span style="flex:1">Most a castle can lose per question</span><select id="optLoss"><option value="0.03">3% of its bricks</option><option value="0.04" selected>4% of its bricks</option><option value="0.05">5% of its bricks</option><option value="0.1">10% of its bricks</option><option value="0">No limit</option></select></div>
+      <div class="opt"><span style="flex:1">Attack strength (seconds left × this)</span><select id="optAtk"><option value="5">×5</option><option value="10" selected>×10</option><option value="20">×20</option></select></div>
+      <div class="opt"><span style="flex:1">Question timer (1 second = 1 base brick)</span><select id="optQsec"><option value="30">30 seconds</option><option value="45">45 seconds</option><option value="60" selected>60 seconds</option></select></div>
+      <div class="opt"><span style="flex:1">Time to pick a target</span><select id="optBattle"><option value="15">15 seconds</option><option value="20" selected>20 seconds</option><option value="30">30 seconds</option></select></div>
+      <div class="opt"><label style="display:flex;gap:10px;align-items:center"><input type="checkbox" id="optShuffle" checked style="width:22px;height:22px"> Shuffle answer choices</label></div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px">
+        <button class="btn amber" id="btnCreate">Create game</button>
+        <button class="btn ghost hidden" id="btnResume"></button>
+      </div>
+      <p class="muted" id="setupMsg"></p>
+    </div>
+    <div class="card rules">
+      <h3 style="margin-top:0;color:var(--navy)">The rules</h3>
+      <p><b>Build.</b> Every question has a timer (60 seconds unless you change it). Answer right and every second left on the clock is one base brick. Base bricks times your multiplier go on your castle.</p>
+      <p><b>Multiplier.</b> Everyone starts at ×1. Right answer: it goes up by 1. Wrong or no answer: it goes down by 1 (never below ×1). No cap.</p>
+      <p><b>Attack.</b> After each question, pick a target on the leaderboard. If you answer the next question right, your target loses seconds left × <span id="atkTxt">10</span> bricks. Your streak multiplier does not count on attacks. Gang up on whoever is close to winning! Castle walls stop most of it: a castle loses at most <span id="lossTxt">4%</span> of its bricks per question, no matter how many players attack it.</p>
+      <p><b>Final Round.</b> Word problems: base bricks are doubled.</p>
+      <p><b>Win.</b> The first castle to reach <span id="goalTxt">15,000</span> bricks wins. If nobody gets there, the biggest castle wins.</p>
+      <p class="muted">Tip: test with one Chromebook before class. Open the student link, join, and make sure the name appears here.</p>
+    </div>
+  </div>
+</div>
+
+<!-- LOBBY -->
+<div class="wrap hidden" id="vLobby">
+  <div class="card joinbox">
+    <div>
+      <div class="muted" style="font-size:22px">Go to</div>
+      <div class="url" id="joinUrl"></div>
+      <div class="muted" style="font-size:22px;margin-top:14px">Game code</div>
+      <div class="big-code" id="bigCode"></div>
+    </div>
+    <div>
+      <div class="stat"><span id="playerCount">0</span> castles ready</div>
+      <p class="muted">Click the x on a name to remove it.</p>
+      <div style="display:flex;gap:12px;margin-top:10px">
+        <button class="btn amber" id="btnStart" disabled>Start game</button>
+        <button class="btn ghost" id="btnCancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:20px;min-height:160px"><div class="chips" id="lobbyChips"></div></div>
+</div>
+
+<!-- ROUND BANNER -->
+<div class="wrap hidden" id="vRound">
+  <div class="card banner">
+    <div class="rn" id="rbNum"></div>
+    <h2 id="rbName"></h2>
+    <div class="muted" id="rbSub" style="font-size:22px"></div>
+    <div style="margin-top:30px"><button class="btn amber" id="btnRoundGo">Start round</button></div>
+  </div>
+</div>
+
+<!-- QUESTION -->
+<div class="wrap hidden" id="vQuestion">
+  <div class="qhead">
+    <div class="timer" id="timer">30</div>
+    <div class="meta">
+      <div class="muted" id="qMeta"></div>
+      <div class="stat"><span id="answeredCount">0</span> of <span id="activeCount">0</span> answered</div>
+    </div>
+    <button class="btn ghost" id="btnReveal">Show answer now</button>
+  </div>
+  <div class="card">
+    <p class="qtext" id="qText"></p>
+    <img class="qimg hidden" id="qImg" alt="Graph for this question">
+  </div>
+  <div class="tiles" id="qTiles" style="margin-top:16px"></div>
+</div>
+
+<!-- REVEAL -->
+<div class="wrap hidden" id="vReveal">
+  <div class="two">
+    <div>
+      <div class="card">
+        <div class="muted" id="rMeta"></div>
+        <p class="qtext" id="rText"></p>
+      </div>
+      <div class="tiles" id="rTiles" style="margin-top:16px"></div>
+      <div class="explain" id="rExplain" style="margin-top:16px"></div>
+    </div>
+    <div class="card">
+      <div class="explain hidden" id="rWin" style="margin-bottom:12px;font-size:22px"></div>
+      <h3 style="margin-top:0;color:var(--navy)">Battle report</h3>
+      <ul class="feed" id="rFeed"></ul>
+      <h3 style="color:var(--navy)">Top castles</h3>
+      <ul class="board" id="rBoard"></ul>
+      <button class="btn amber" id="btnNext" style="width:100%;margin-top:12px">Battle phase</button>
+    </div>
+  </div>
+</div>
+
+<!-- BATTLE -->
+<div class="wrap hidden" id="vBattle">
+  <div class="qhead">
+    <div class="timer" id="bTimer">20</div>
+    <div class="meta">
+      <div class="stat">Pick your target! <span class="muted" style="font-size:17px">First to <span id="goalTxt2"></span> bricks wins.</span></div>
+      <div class="muted"><span id="pickedCount">0</span> of <span id="pickActive">0</span> players have a target. A hit lands only if the attacker answers the next question right.</div>
+    </div>
+    <button class="btn amber" id="btnBattleGo">Next question</button>
+  </div>
+  <div class="castles" id="bCastles"></div>
+</div>
+
+<!-- END -->
+<div class="wrap hidden" id="vEnd">
+  <div class="card">
+    <h1 style="text-align:center;color:var(--navy);margin-top:0" id="endTitle">The Last Castles Standing</h1>
+    <div class="castles" id="endCastles" style="max-width:720px;margin:0 auto 20px"></div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+      <button class="btn amber" id="btnCsv">Download scores (CSV)</button>
+      <button class="btn ghost" id="btnCopy">Copy scores</button>
+      <button class="btn ghost" id="btnNew">New game</button>
+      <span class="muted" id="copyMsg" style="align-self:center"></span>
+    </div>
+    <table class="res" id="resTable"></table>
+  </div>
+</div>
+
+<script src="peerjs.min.js"></script>
+<script src="questions.js"></script>
+<script src="net.js"></script>
+<script src="castle.js"></script>
+<script>
+(function(){
+"use strict";
+const $=id=>document.getElementById(id);
+const SHAPES=["▲","◆","●","■"];
+const SAVE_KEY="ac-castle-host-v1";
+const views=["vSetup","vLobby","vRound","vQuestion","vReveal","vBattle","vEnd"];
+function show(v){views.forEach(x=>$(x).classList.toggle("hidden",x!==v));}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+const roundOf=q=>ROUNDS.find(r=>r.n===q.r);
+
+let S=null,peer=null,tick=null;
+const conns=new Map(); // private pid -> connection
+
+// ---------- setup
+const rl=$("roundList");
+ROUNDS.forEach(r=>{const n=QUESTIONS.filter(q=>q.r===r.n).length;const l=document.createElement("label");
+  l.innerHTML=`<input type="checkbox" value="${r.n}" checked> <span><b>${r.n===9?"Final":"Round "+r.n}:</b> ${esc(r.name.replace(" (Double Points)",""))} <span class="muted">(${n} questions)</span></span>`;rl.appendChild(l);});
+function loadSaved(){try{const s=JSON.parse(localStorage.getItem(SAVE_KEY)||"null");if(s&&Date.now()-s.created<6*3600e3&&s.phase!=="end")return s;}catch(e){}return null;}
+function save(){try{localStorage.setItem(SAVE_KEY,JSON.stringify(S));}catch(e){}}
+$("optGoal").onchange=()=>{$("goalTxt").textContent=(+$("optGoal").value).toLocaleString();};
+$("optLoss").onchange=()=>{const v=+$("optLoss").value;$("lossTxt").textContent=v?Math.round(v*100)+"%":"all";};
+$("optAtk").onchange=()=>{$("atkTxt").textContent=$("optAtk").value;};
+const saved=loadSaved();
+if(saved){$("btnResume").textContent="Resume game "+saved.code;$("btnResume").classList.remove("hidden");}
+$("btnResume").onclick=()=>{S=saved;openRoom(true);};
+$("btnCreate").onclick=()=>{
+  const picked=[...rl.querySelectorAll("input:checked")].map(i=>+i.value);
+  if(!picked.length){$("setupMsg").textContent="Pick at least one round.";return;}
+  const order=[];QUESTIONS.forEach((q,i)=>{if(picked.includes(q.r))order.push(i);});
+  const shuffle=$("optShuffle").checked,perm={};
+  order.forEach(i=>{const q=QUESTIONS[i];let p=q.c.map((_,k)=>k);
+    const fixed=q.c.length<4||q.c.some(c=>/^Graph |None|Both|Neither/.test(c));
+    if(shuffle&&!fixed)for(let k=p.length-1;k>0;k--){const j=Math.floor(Math.random()*(k+1));[p[k],p[j]]=[p[j],p[k]];}
+    perm[i]=p;});
+  S={code:String(Math.floor(1000+Math.random()*9000)),created:Date.now(),phase:"lobby",order,perm,pos:-1,qStart:0,qEnd:0,bEnd:0,
+     goal:+$("optGoal").value,atk:+$("optAtk").value,loss:+$("optLoss").value,qSec:+$("optQsec").value,winner:null,battleSec:+$("optBattle").value,players:{},nextUid:1,feed:[],resolved:{}};
+  save();openRoom(false);
+};
+
+// ---------- networking
+function setNet(cls,text){$("netStatus").className="status "+cls;$("netText").textContent=text;}
+function openRoom(resuming){
+  $("barCode").textContent="Code "+S.code;$("barCode").style.display="";
+  $("joinUrl").textContent=Net.studentUrl();$("bigCode").textContent=S.code;
+  setNet("","Connecting...");
+  if(peer){try{peer.destroy();}catch(e){}}
+  peer=new Peer(Net.PREFIX+S.code,Net.peerOptions());
+  peer.on("open",()=>{setNet("ok","Online");render();});
+  peer.on("connection",c=>{c.on("data",d=>onData(c,d));c.on("close",()=>{if(c._pid&&conns.get(c._pid)===c){conns.delete(c._pid);render();}});c.on("error",()=>{});});
+  peer.on("disconnected",()=>{setNet("err","Reconnecting...");setTimeout(()=>{try{peer.reconnect();}catch(e){}},1500);});
+  peer.on("error",e=>{
+    if(e.type==="unavailable-id"){if(resuming){setNet("err","Code still in use. Retrying...");setTimeout(()=>openRoom(true),4000);}else{S.code=String(Math.floor(1000+Math.random()*9000));save();openRoom(false);}}
+    else if(["network","server-error","socket-error","socket-closed"].includes(e.type))setNet("err","Can't reach the game server. Check the internet.");
+  });
+  render();
+}
+function cleanName(n){return String(n||"").replace(/[\u0000-\u001f<>]/g,"").replace(/\s+/g," ").trim().slice(0,20);}
+function byUid(uid){return Object.keys(S.players).find(k=>S.players[k].uid===uid);}
+function onData(c,d){
+  if(!d||typeof d!=="object")return;
+  if(d.t==="join"){
+    const pid=String(d.pid||"").slice(0,40),name=cleanName(d.name);
+    if(!pid||!name){c.send({t:"reject",msg:"Type your name."});return;}
+    let p=S.players[pid];
+    if(!p){
+      if(S.phase==="end"){c.send({t:"reject",msg:"This game is over."});return;}
+      const taken=Object.entries(S.players).some(([k,v])=>!v.kicked&&k!==pid&&v.name.toLowerCase()===name.toLowerCase());
+      if(taken){c.send({t:"reject",msg:"That name is taken. Add your last initial."});return;}
+      p=S.players[pid]={uid:"c"+(S.nextUid++),name,bricks:0,mult:1,maxMult:1,target:null,ans:{},built:0,dealt:0,taken:0,last:null};
+    }else if(p.kicked){c.send({t:"reject",msg:"Ask your teacher to let you back in."});return;}
+    c._pid=pid;const old=conns.get(pid);if(old&&old!==c){try{old.close();}catch(e){}}
+    conns.set(pid,c);save();render();sendTo(pid);return;
+  }
+  const pid=c._pid,p=pid&&S.players[pid];if(!p||p.kicked)return;
+  if(d.t==="ans"){
+    if(S.phase!=="question")return;
+    const qi=S.order[S.pos];if(d.qi!==qi||p.ans[qi])return;
+    const shown=+d.choice,perm=S.perm[qi];if(!(shown>=0&&shown<perm.length))return;
+    const q=QUESTIONS[qi],ms=Math.max(0,Date.now()-S.qStart);if(ms>S.qSec*1000+1500)return;
+    p.ans[qi]={shown,right:perm[shown]===q.a,ms};save();sendTo(pid);renderCounts();
+    const act=activePids();if(act.length&&act.every(id=>S.players[id].ans[qi]))setTimeout(()=>{if(S.phase==="question"&&S.order[S.pos]===qi)reveal();},700);
+    return;
+  }
+  if(d.t==="target"){
+    if(S.phase!=="battle"&&S.phase!=="round"&&S.phase!=="reveal")return;
+    const to=d.to===null?null:byUid(String(d.to));
+    if(d.to!==null&&(!to||to===pid||S.players[to].kicked))return;
+    p.target=to?S.players[to].uid:null;save();sendTo(pid);renderCounts();
+  }
+}
+function activePids(){return Object.keys(S.players).filter(id=>!S.players[id].kicked&&conns.has(id));}
+function live(){return Object.entries(S.players).filter(([,p])=>!p.kicked);}
+function ranked(){return live().sort((a,b)=>b[1].bricks-a[1].bricks||a[1].name.localeCompare(b[1].name));}
+function rankOf(pid){const r=ranked();const i=r.findIndex(([k])=>k===pid);if(i<0)return null;let k=i;while(k>0&&r[k-1][1].bricks===r[i][1].bricks)k--;return k+1;}
+function curQ(){const qi=S.order[S.pos];return {qi,q:QUESTIONS[qi]};}
+function shownChoices(qi){return S.perm[qi].map(k=>QUESTIONS[qi].c[k]);}
+function correctShown(qi){return S.perm[qi].indexOf(QUESTIONS[qi].a);}
+function maxBricks(){return S.goal;}
+function targetName(p){if(!p.target)return null;const k=byUid(p.target);return k&&!S.players[k].kicked?S.players[k].name:null;}
+
+// ---------- scoring: all answers and attacks resolve together when time is up
+function resolve(){
+  const {qi,q}=curQ();if(S.resolved[qi])return;S.resolved[qi]=true;
+  const lim=S.qSec*1000,dbl=roundOf(q).double?2:1,feed=[],dmgTo={};
+  live().forEach(([pid,p])=>{
+    const a=p.ans[qi],right=!!(a&&a.right);
+    const base=right?dbl*Math.max(1,Math.min(S.qSec,Math.ceil((lim-a.ms)/1000))):0;
+    const multUsed=p.mult,built=base*multUsed;
+    p.bricks+=built;p.built+=built;
+    p.last={right,answered:!!a,base,multUsed,built,attack:null,hits:[]};
+    if(right)p.mult=p.mult+1;else p.mult=Math.max(1,p.mult-1);
+    p.maxMult=Math.max(p.maxMult,p.mult);
+    const tk=p.target?byUid(p.target):null;
+    if(tk&&tk!==pid&&!S.players[tk].kicked){
+      if(right){(dmgTo[tk]=dmgTo[tk]||[]).push({from:pid,dmg:base*(S.atk||10)});}
+      else p.last.attack={to:S.players[tk].name,dmg:0,miss:true};
+    }
+  });
+  Object.entries(dmgTo).forEach(([tk,list])=>{
+    const t=S.players[tk],total=list.reduce((a,x)=>a+x.dmg,0);
+    const allowed=S.loss?Math.min(t.bricks,Math.floor(S.loss*t.bricks)):t.bricks;
+    const scale=total>allowed?allowed/total:1;
+    if(scale<1)t.last.blocked=total-allowed;
+    list.forEach(({from,dmg})=>{
+      const lost=Math.min(t.bricks,Math.floor(dmg*scale));t.bricks-=lost;t.taken+=lost;
+      const a=S.players[from];a.dealt+=lost;a.last.attack={to:t.name,dmg:lost,miss:false};
+      t.last.hits.push({from:a.name,dmg:lost});feed.push({from:a.name,to:t.name,dmg:lost});
+    });
+    if(scale<1)feed.push({wall:true,to:t.name,dmg:total-allowed});
+  });
+  feed.sort((x,y)=>(x.wall?1:0)-(y.wall?1:0)||y.dmg-x.dmg);S.feed=feed;
+  const done=live().filter(([,p])=>p.bricks>=S.goal).sort((a,b)=>b[1].bricks-a[1].bricks);
+  if(done.length)S.winner=done[0][0];
+}
+
+// ---------- what each student sees
+function viewFor(pid){
+  const p=S.players[pid];
+  const v={t:"state",phase:S.phase,name:p.name,uid:p.uid,bricks:p.bricks,mult:p.mult,rank:rankOf(pid),players:live().length,maxBricks:maxBricks(),goal:S.goal,atk:S.atk||10,winnerName:S.winner?S.players[S.winner].name:null,target:p.target,targetName:targetName(p)};
+  if(S.phase==="question"||S.phase==="reveal"){
+    const {qi,q}=curQ(),R=roundOf(q),a=p.ans[qi];
+    v.q={qi,n:S.pos+1,of:S.order.length,text:q.q,img:q.img||null,choices:shownChoices(qi),double:!!R.double};
+    v.answered=a?a.shown:null;
+    if(S.phase==="question")v.remaining=Math.max(0,S.qEnd-Date.now());
+    if(S.phase==="reveal"){v.correct=correctShown(qi);v.explain=q.x;v.last=p.last;}
+  }
+  if(S.phase==="battle"||S.phase==="round"){
+    v.board=ranked().map(([k,o])=>({uid:o.uid,name:o.name,bricks:o.bricks,mult:o.mult,me:k===pid}));
+    if(S.phase==="battle")v.remaining=Math.max(0,S.bEnd-Date.now());
+    if(S.phase==="round"){const q=QUESTIONS[S.order[S.pos+1]],R=roundOf(q);v.roundName=R.n===9?"Final Round: Word Problems":"Round "+R.n+": "+R.name;v.double=!!R.double;}
+  }
+  if(S.phase==="end"){v.correctCount=Object.values(p.ans).filter(a=>a.right).length;v.total=S.played||S.order.length;v.dealt=p.dealt;v.taken=p.taken;v.maxMult=p.maxMult;}
+  return v;
+}
+function sendTo(pid){const c=conns.get(pid);if(c&&c.open){try{c.send(viewFor(pid));}catch(e){}}}
+function broadcast(){for(const pid of conns.keys())sendTo(pid);}
+
+// ---------- flow
+$("btnStart").onclick=()=>{S.pos=-1;goNext();};
+$("btnCancel").onclick=()=>{if(peer)peer.destroy();try{localStorage.removeItem(SAVE_KEY);}catch(e){}location.reload();};
+$("btnRoundGo").onclick=()=>ask();
+$("btnReveal").onclick=()=>reveal();
+$("btnNext").onclick=()=>{if(S.winner||S.pos+1>=S.order.length)finish();else battle();};
+$("btnBattleGo").onclick=()=>goNext();
+function goNext(){
+  if(S.pos+1>=S.order.length){finish();return;}
+  const nq=QUESTIONS[S.order[S.pos+1]],pq=S.pos>=0?QUESTIONS[S.order[S.pos]]:null;
+  if(!pq||pq.r!==nq.r){S.phase="round";save();render();broadcast();return;}
+  ask();
+}
+function ask(){S.pos++;S.phase="question";S.qStart=Date.now();S.qEnd=S.qStart+S.qSec*1000;save();render();broadcast();}
+function reveal(){if(S.phase!=="question")return;resolve();S.phase="reveal";save();render();broadcast();}
+function battle(){S.phase="battle";S.bEnd=Date.now()+S.battleSec*1000;save();render();broadcast();}
+function finish(){S.played=S.pos+1;S.phase="end";save();render();broadcast();try{localStorage.removeItem(SAVE_KEY);}catch(e){}}
+
+// ---------- rendering
+function tilesHtml(choices,o={}){return choices.map((c,i)=>{let cls="tile t"+i;if(o.correct!=null)cls+=i===o.correct?" right":" dim";
+  return `<div class="${cls}"><span class="shape">${SHAPES[i]}</span><span>${esc(c)}</span>${o.counts?`<span class="count">${o.counts[i]}</span>`:""}</div>`;}).join("");}
+function castleCard(pid,p,mx,lead){return `<div class="cas">${Castle.svg(p.bricks,mx,{crown:lead})}<div class="nm">${esc(p.name)}</div><div class="bk"><span class="rk">#${rankOf(pid)}</span> ${p.bricks.toLocaleString()} <span class="mult">×${p.mult}</span></div><div class="prog"><i style="width:${Math.min(100,100*p.bricks/S.goal)}%"></i></div>${p.bricks>=0.6*S.goal?`<div class="warn">⚠ Almost there! ${Math.floor(100*p.bricks/S.goal)}%</div>`:""}</div>`;}
+function renderCounts(){
+  if(S.phase==="question"){const {qi}=curQ(),act=activePids();$("answeredCount").textContent=act.filter(id=>S.players[id].ans[qi]).length;$("activeCount").textContent=act.length;}
+  if(S.phase==="battle"){const act=activePids();$("pickedCount").textContent=act.filter(id=>targetName(S.players[id])).length;$("pickActive").textContent=act.length;}
+}
+function timerLoop(el,end,onDone){const t=()=>{const left=Math.max(0,Math.ceil((end-Date.now())/1000));el.textContent=left;el.classList.toggle("low",left<=5);if(left<=0){clearInterval(tick);onDone();}};t();tick=setInterval(t,250);}
+function render(){
+  if(!S){show("vSetup");return;}
+  clearInterval(tick);tick=null;
+  if(S.phase==="lobby"){
+    show("vLobby");const list=live();$("playerCount").textContent=list.length;$("btnStart").disabled=!list.length;
+    $("lobbyChips").innerHTML=list.map(([id,p])=>`<span class="chip${conns.has(id)?"":" off"}">${esc(p.name)}<button data-kick="${esc(id)}" title="Remove">✕</button></span>`).join("")||'<span class="muted">Waiting for players...</span>';return;
+  }
+  if(S.phase==="round"){
+    show("vRound");const q=QUESTIONS[S.order[S.pos+1]],R=roundOf(q),n=S.order.filter(i=>QUESTIONS[i].r===R.n).length;
+    $("rbNum").textContent=R.n===9?"FINAL ROUND":"ROUND "+R.n;$("rbName").textContent=R.n===9?"Word Problems":R.name;
+    $("rbSub").textContent=`First to ${S.goal.toLocaleString()} bricks wins  |  Lesson ${R.lesson}  |  ${n} question${n>1?"s":""}${R.double?"  |  Base bricks doubled":""}`;return;
+  }
+  if(S.phase==="question"){
+    show("vQuestion");const {qi,q}=curQ(),R=roundOf(q);
+    $("qMeta").textContent=`Question ${S.pos+1} of ${S.order.length}  |  ${R.n===9?"Final Round (base bricks doubled)":"Round "+R.n+": "+R.name}`;
+    $("qText").textContent=q.q;if(q.img){$("qImg").src=q.img;$("qImg").classList.remove("hidden");}else $("qImg").classList.add("hidden");
+    $("qTiles").innerHTML=tilesHtml(shownChoices(qi));renderCounts();timerLoop($("timer"),S.qEnd,reveal);return;
+  }
+  if(S.phase==="reveal"){
+    show("vReveal");const {qi,q}=curQ(),R=roundOf(q),ch=shownChoices(qi),counts=ch.map(()=>0);
+    live().forEach(([,p])=>{const a=p.ans[qi];if(a)counts[a.shown]++;});
+    $("rMeta").textContent=`Question ${S.pos+1} of ${S.order.length}  |  ${R.n===9?"Final Round":"Round "+R.n+": "+R.name}`;
+    $("rText").textContent=q.q;$("rTiles").innerHTML=tilesHtml(ch,{correct:correctShown(qi),counts});$("rExplain").textContent=q.x;
+    $("rFeed").innerHTML=S.feed.length?S.feed.map(f=>f.wall?`<li class="miss">🛡 ${esc(f.to)}'s walls blocked ${f.dmg.toLocaleString()} bricks</li>`:`<li>⚔ <b>${esc(f.from)}</b> hit <b>${esc(f.to)}</b> <span class="dmg">−${f.dmg.toLocaleString()}</span></li>`).join(""):'<li class="miss">No attacks landed.</li>';
+    $("rBoard").innerHTML=ranked().slice(0,6).map(([id,p])=>`<li><span class="rk">${rankOf(id)}</span><span class="nm">${esc(p.name)}</span><span class="mult">×${p.mult}</span><span class="sc">${p.bricks.toLocaleString()}</span></li>`).join("");
+    $("btnNext").textContent=S.winner||S.pos+1>=S.order.length?"Show final castles":"Battle phase";
+    $("rWin").classList.toggle("hidden",!S.winner);if(S.winner)$("rWin").textContent=`🏰 ${S.players[S.winner].name} completed a ${S.goal.toLocaleString()}-brick castle and wins!`;return;
+  }
+  if(S.phase==="battle"){
+    show("vBattle");const mx=maxBricks(),r=ranked();
+    $("bCastles").innerHTML=r.map(([id,p],i)=>castleCard(id,p,mx,i===0&&p.bricks>0)).join("");
+    $("goalTxt2").textContent=S.goal.toLocaleString();renderCounts();timerLoop($("bTimer"),S.bEnd,goNext);return;
+  }
+  if(S.phase==="end"){
+    show("vEnd");const r=ranked(),mx=maxBricks();
+    $("endTitle").textContent=S.winner?`${S.players[S.winner].name} built a full castle and wins!`:(r[0]?`${r[0][1].name} has the biggest castle and wins!`:"Game over");
+    $("endCastles").innerHTML=r.slice(0,3).map(([id,p],i)=>castleCard(id,p,mx,i===0)).join("");
+    $("resTable").innerHTML="<tr><th>Rank</th><th>Name</th><th>Bricks</th><th>Correct</th><th>Best ×</th><th>Knocked off</th><th>Lost</th></tr>"+
+      r.map(([id,p])=>`<tr><td>${rankOf(id)}</td><td>${esc(p.name)}</td><td>${p.bricks}</td><td>${Object.values(p.ans).filter(a=>a.right).length} of ${S.played||S.order.length}</td><td>×${p.maxMult}</td><td>${p.dealt}</td><td>${p.taken}</td></tr>`).join("");
+  }
+}
+$("lobbyChips").addEventListener("click",e=>{const id=e.target.getAttribute&&e.target.getAttribute("data-kick");if(!id)return;
+  S.players[id].kicked=true;const c=conns.get(id);if(c){try{c.send({t:"reject",msg:"You were removed from the game. Ask your teacher."});}catch(x){}setTimeout(()=>{try{c.close();}catch(x){}},300);conns.delete(id);}save();render();});
+
+// ---------- results export
+function csv(){
+  const r=ranked(),head=["Rank","Name","Bricks","Correct","Out of","Best multiplier","Bricks knocked off","Bricks lost"].concat(S.order.slice(0,S.played||S.order.length).map((qi,k)=>"Q"+(k+1)));
+  const rows=r.map(([id,p])=>[rankOf(id),p.name,p.bricks,Object.values(p.ans).filter(a=>a.right).length,S.played||S.order.length,p.maxMult,p.dealt,p.taken].concat(S.order.slice(0,S.played||S.order.length).map(qi=>p.ans[qi]?(p.ans[qi].right?1:0):"")));
+  return [head].concat(rows).map(row=>row.map(v=>{v=String(v);return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;}).join(",")).join("\r\n");
+}
+$("btnCsv").onclick=()=>{const b=new Blob([csv()],{type:"text/csv"}),a=document.createElement("a"),d=new Date();a.href=URL.createObjectURL(b);
+  a.download=`Ch4_Castle_Battle_${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}.csv`;document.body.appendChild(a);a.click();a.remove();};
+$("btnCopy").onclick=()=>{const txt=ranked().map(([id,p])=>`${p.name}\t${p.bricks}\t${Object.values(p.ans).filter(a=>a.right).length}/${S.played||S.order.length}`).join("\n");
+  navigator.clipboard.writeText("Name\tBricks\tCorrect\n"+txt).then(()=>$("copyMsg").textContent="Copied. Paste into a spreadsheet.",()=>$("copyMsg").textContent="Copy failed. Use Download instead.");};
+$("btnNew").onclick=()=>{if(peer)peer.destroy();location.reload();};
+window.addEventListener("beforeunload",e=>{if(S&&!["end","lobby"].includes(S.phase)){e.preventDefault();e.returnValue="";}});
+render();
+})();
+</script>
+</body>
+</html>
