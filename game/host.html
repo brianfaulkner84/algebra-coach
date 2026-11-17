@@ -40,6 +40,9 @@
   table.res th,table.res td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left}
   table.res th{background:var(--navy);color:#fff}
   .rules p{margin:6px 0}
+  .qwrap{display:grid;grid-template-columns:1fr 300px;gap:16px;align-items:start}
+  .sideboard .board li{font-size:17px;padding:6px 6px;gap:8px}
+  .sideboard .prog{height:6px}
   .tut{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
   .tcard{background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px 12px}
   .tcard h4{margin:0 0 4px;color:var(--navy);font-family:Cambria,Georgia,serif;font-size:17px}
@@ -147,11 +150,16 @@
     </div>
     <button class="btn ghost" id="btnReveal">Show answer now</button>
   </div>
-  <div class="card">
-    <p class="qtext" id="qText"></p>
-    <img class="qimg hidden" id="qImg" alt="Graph for this question">
+  <div class="qwrap">
+    <div>
+      <div class="card">
+        <p class="qtext" id="qText"></p>
+        <img class="qimg hidden" id="qImg" alt="Graph for this question">
+      </div>
+      <div class="tiles" id="qTiles" style="margin-top:16px"></div>
+    </div>
+    <div class="card sideboard"><h3 style="margin:0 0 6px;color:var(--navy)">🏰 Leaderboard</h3><ul class="board" id="qBoard"></ul><div class="muted" style="font-size:14px;margin-top:6px">First to <span id="qGoal"></span> bricks wins</div></div>
   </div>
-  <div class="tiles" id="qTiles" style="margin-top:16px"></div>
 </div>
 
 <!-- REVEAL -->
@@ -410,12 +418,33 @@ function finish(){S.played=S.pos+1;S.phase="end";save();render();broadcast();try
 function tilesHtml(choices,o={}){return choices.map((c,i)=>{let cls="tile t"+i;if(o.correct!=null)cls+=i===o.correct?" right":" dim";
   return `<div class="${cls}"><span class="shape">${SHAPES[i]}</span><span>${esc(c)}</span>${o.counts?`<span class="count">${o.counts[i]}</span>`:""}</div>`;}).join("");}
 function castleCard(pid,p,mx,lead){return `<div class="cas">${Castle.svg(p.bricks,mx,{crown:lead})}<div class="nm">${esc(p.name)}</div><div class="bk"><span class="rk">#${rankOf(pid)}</span> ${p.bricks.toLocaleString()} <span class="mult">×${p.mult}</span></div><div class="prog"><i style="width:${Math.min(100,100*p.bricks/S.goal)}%"></i></div>${p.bricks>=0.6*S.goal?`<div class="warn">⚠ Almost there! ${Math.floor(100*p.bricks/S.goal)}%</div>`:""}</div>`;}
+function renderSideBoard(){
+  $("qGoal").textContent=S.goal.toLocaleString();
+  $("qBoard").innerHTML=ranked().slice(0,8).map(([id,p])=>`<li><span class="rk">${rankOf(id)}</span><span class="nm">${esc(p.name)}</span><span class="mult">×${p.mult}</span><span class="sc">${p.bricks.toLocaleString()}</span></li>`).join("");
+}
 function renderCounts(){
   if(S.phase==="question"){const {qi}=curQ(),act=activePids();$("answeredCount").textContent=act.filter(id=>S.players[id].ans[qi]).length;$("activeCount").textContent=act.length;}
   if(S.phase==="battle"){const act=activePids();$("pickedCount").textContent=act.filter(id=>targetName(S.players[id])).length;$("pickActive").textContent=act.length;}
 }
-function phaseTimer(el){if(S.paused){el.textContent="❚❚";el.classList.remove("low");return;}timerLoop(el,S.end,onTimerEnd);}
-function timerLoop(el,end,onDone){const t=()=>{const left=Math.max(0,Math.ceil((end-Date.now())/1000));el.textContent=left;el.classList.toggle("low",left<=5);if(left<=0){clearInterval(tick);onDone();}};t();tick=setInterval(t,250);}
+// One master clock drives every timed screen. Rendering never starts or stops timers.
+const TIMER_EL={question:"timer",round:"rbTimer",reveal:"rTimer",battle:"bTimer"};
+let firedKey=null;
+function paintTimer(){
+  if(!S)return;const id=TIMER_EL[S.phase];if(!id)return;const el=$(id);
+  if(S.phase!=="question"&&S.paused){el.textContent="❚❚";el.classList.remove("low");return;}
+  const end=S.phase==="question"?S.qEnd:S.end,left=Math.max(0,Math.ceil((end-Date.now())/1000));
+  el.textContent=left;el.classList.toggle("low",left<=5);
+  if(S.phase==="question"){const {q}=curQ(),dbl=roundOf(q).double?2:1;$("worthNow").textContent=dbl*Math.max(1,left);}
+}
+function masterTick(){
+  if(!S)return;paintTimer();
+  const now=Date.now();
+  if(S.phase==="question"){if(now>=S.qEnd)reveal();return;}
+  if(!["round","reveal","battle"].includes(S.phase)||S.paused||now<S.end)return;
+  const key=S.phase+":"+S.pos+":"+S.end;if(firedKey===key)return;firedKey=key;onTimerEnd();
+}
+setInterval(masterTick,200);
+function phaseTimer(){paintTimer();}
 function render(){
   if(!S){show("vSetup");return;}
   clearInterval(tick);tick=null;renderPause();
@@ -437,8 +466,7 @@ function render(){
     $("qMeta").textContent=`Question ${S.pos+1} of ${S.order.length}  |  ${R.n===9?"Final Round (base bricks doubled)":"Round "+R.n+": "+R.name}`;
     $("qText").textContent=q.q;if(q.img){$("qImg").src=q.img;$("qImg").classList.remove("hidden");}else $("qImg").classList.add("hidden");
     $("qTiles").innerHTML=tilesHtml(shownChoices(qi));renderCounts();
-    const dbl=R.double?2:1,w=()=>{$("worthNow").textContent=dbl*Math.max(1,Math.ceil((S.qEnd-Date.now())/1000));};w();const wi=setInterval(()=>{if(S.phase!=="question")return clearInterval(wi);w();},250);
-    timerLoop($("timer"),S.qEnd,reveal);return;
+    paintTimer();renderSideBoard();return;
   }
   if(S.phase==="reveal"){
     show("vReveal");const {qi,q}=curQ(),R=roundOf(q),ch=shownChoices(qi),counts=ch.map(()=>0);
