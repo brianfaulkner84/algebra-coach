@@ -366,7 +366,7 @@ function viewFor(pid){
     v.q={qi,n:S.pos+1,of:S.order.length,text:q.q,img:q.img||null,choices:shownChoices(qi),double:!!R.double,qSec:S.qSec};
     v.answered=a?a.shown:null;
     if(S.phase==="question")v.remaining=Math.max(0,S.qEnd-Date.now());
-    if(S.phase==="reveal"){v.correct=correctShown(qi);v.explain=q.x;v.last=p.last;v.learn=R.learn;v.roundName=R.n===9?"Word Problems":R.name;}
+    if(S.phase==="reveal"){v.correct=correctShown(qi);v.explain=q.x;v.steps=q.s||[];v.last=p.last;v.learn=R.learn;v.roundName=R.n===9?"Word Problems":R.name;}
   }
   if(S.phase==="battle"||S.phase==="round"){
     v.board=ranked().map(([k,o])=>({uid:o.uid,name:o.name,bricks:o.bricks,mult:o.mult,me:k===pid}));
@@ -472,7 +472,7 @@ function render(){
     show("vReveal");const {qi,q}=curQ(),R=roundOf(q),ch=shownChoices(qi),counts=ch.map(()=>0);
     live().forEach(([,p])=>{const a=p.ans[qi];if(a)counts[a.shown]++;});
     $("rMeta").textContent=`Question ${S.pos+1} of ${S.order.length}  |  ${R.n===9?"Final Round":"Round "+R.n+": "+R.name}`;
-    $("rText").textContent=q.q;$("rTiles").innerHTML=tilesHtml(ch,{correct:correctShown(qi),counts});$("rExplain").textContent=q.x;
+    $("rText").textContent=q.q;$("rTiles").innerHTML=tilesHtml(ch,{correct:correctShown(qi),counts});$("rExplain").innerHTML=`<div style="margin-bottom:6px">How we got the answer:</div><ol style="margin:0;padding-left:26px;font-weight:600">${(q.s||[q.x]).map(t=>`<li style="margin:4px 0">${esc(t)}</li>`).join("")}</ol>`;
     $("rFeed").innerHTML=S.feed.length?S.feed.map(f=>f.wall?`<li class="miss">🛡 ${esc(f.to)}'s walls blocked ${f.dmg.toLocaleString()} bricks</li>`:`<li>⚔ <b>${esc(f.from)}</b> hit <b>${esc(f.to)}</b> <span class="dmg">−${f.dmg.toLocaleString()}</span></li>`).join(""):'<li class="miss">No attacks landed.</li>';
     $("rBoard").innerHTML=ranked().slice(0,6).map(([id,p])=>`<li><span class="rk">${rankOf(id)}</span><span class="nm">${esc(p.name)}</span><span class="mult">×${p.mult}</span><span class="sc">${p.bricks.toLocaleString()}</span></li>`).join("");
     $("btnNext").textContent=S.winner||S.pos+1>=S.order.length?"Show final castles":"Battle phase now";phaseTimer($("rTimer"));

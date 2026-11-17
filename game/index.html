@@ -282,7 +282,8 @@ function render(d,samePhase){
     $("rBox").className="result "+(L.right?"good":L.answered?"bad":"none");
     $("r1").textContent=L.right?"Correct!":L.answered?"Not quite":"Time's up";
     $("r2").textContent=L.right?`+${fmt(L.built)} bricks (${L.base} × ${L.multUsed})`:"Right answer: "+d.q.choices[d.correct];
-    $("rExplain").textContent=(L.right?"Why: ":"How to get it: ")+(d.explain||"");
+    const st=(d.steps&&d.steps.length)?d.steps:[d.explain||""];
+    $("rExplain").innerHTML=`<div style="margin-bottom:4px">${L.right?"Here is why it works:":"How the answer happened:"}</div><ol style="margin:0;padding-left:24px;font-weight:600">${st.map(x=>`<li style="margin:5px 0">${esc(x)}</li>`).join("")}</ol>`;
     if(!L.right&&d.learn){$("rLearn").innerHTML=learnHtml(d.learn,true);$("rLearn").classList.remove("hidden");}else $("rLearn").classList.add("hidden");
     const lines=[];
     lines.push(li(L.right?`<span class="ok">Multiplier up: ×${d.mult}</span>`:`Multiplier stays at ×${d.mult}. Get the next one right to raise it!`));
